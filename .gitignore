@@ -1,0 +1,9 @@
+/target
+build-ggml
+.direnv
+result
+*.ptx
+*.cubin
+.pi
+# written by build.rs, holds /nix/store paths
+kernels/compile_flags.txt

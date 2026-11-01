@@ -1,0 +1,54 @@
+ruquant: let ggml-cuda run our kernels inside its captured CUDA graph.
+
+Adds ggml_cuda_set_custom1_hook(). Once a launcher is registered, ggml-cuda claims
+GGML_OP_MAP_CUSTOM1 in supports_op and calls the launcher from ggml_cuda_compute_forward on
+its own stream, so the launch is captured and replayed with the rest of the graph.
+
+Base: the llama.cpp vendored by llama-cpp-sys-2 0.1.160 (ggml 0.26.0), copied to
+third_party/llama.cpp. Apply from that directory: patch -p1 < this file.
+build-ggml.sh applies it automatically when the RUQUANT markers are missing.
+
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2120,6 +2120,18 @@
+         nb1, nb2, nb3, stream);
+ }
+ 
++// ---- RUQUANT patch: begin ----
++// Custom-kernel hook. kernels/ registers a launcher; ggml_cuda_compute_forward runs inside
++// ggml_cuda_graph_evaluate_and_capture, so the launch lands in the captured CUDA graph and is
++// replayed with everything else instead of costing a launch + event per step.
++typedef void (* ggml_cuda_custom1_fn)(cudaStream_t stream, struct ggml_tensor * dst);
++static ggml_cuda_custom1_fn g_rq_custom1 = nullptr;
++
++extern "C" GGML_BACKEND_API void ggml_cuda_set_custom1_hook(ggml_cuda_custom1_fn fn) {
++    g_rq_custom1 = fn;
++}
++// ---- RUQUANT patch: end ----
++
+ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {
+     switch (dst->op) {
+         case GGML_OP_ARGMAX:
+@@ -2471,6 +2483,12 @@
+         case GGML_OP_LIGHTNING_INDEXER:
+             ggml_cuda_lightning_indexer(ctx, dst);
+             break;
++        case GGML_OP_MAP_CUSTOM1: // ---- RUQUANT patch
++            if (g_rq_custom1 == nullptr) {
++                return false;
++            }
++            g_rq_custom1(ctx.stream(), dst);
++            break;
+         default:
+             return false;
+     }
+@@ -5250,6 +5268,9 @@
+ 
+ // TODO: move these functions here
+ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
++    if (op->op == GGML_OP_MAP_CUSTOM1) {
++        return g_rq_custom1 != nullptr; // ---- RUQUANT patch
++    }
+     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
+ 
+     // check if all the sources are allocated on this device

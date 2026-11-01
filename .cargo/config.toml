@@ -1,0 +1,6 @@
+# Project cargo config.
+# nb: on this machine RUSTFLAGS comes from the devShell (nix develop), because it has to
+# point at the CUDA lib dir, whose /nix/store path is only known inside the shell.
+[env]
+# ggml's GGML_CCACHE=OFF (see flake.nix) is what actually disables sccache; this is belt and braces.
+RUSTC_WRAPPER = { value = "", force = true }
