@@ -78,7 +78,7 @@ counts their instructions, and turns the counts into a verify-step time per widt
 
 ```sh
 nix develop .#rocm -c gfx906/build.sh      # gfx906 asm: llama.cpp q4_0 kernels + ours
-python3 gfx906/model.py --detail 32        # instruction mix + step time vs T
+python3 gfx906/model.py --kernels          # instruction mix + Qwen3.8 / DFlash2 step times
 nix develop -c nvcc -O2 -arch=sm_86 -std=c++17 gfx906/test_skinny.cu -o gfx906/build/test_skinny
 LD_LIBRARY_PATH=/run/opengl-driver/lib gfx906/build/test_skinny   # same kernels on the 3090
 ```
@@ -90,7 +90,9 @@ LD_LIBRARY_PATH=/run/opengl-driver/lib gfx906/build/test_skinny   # same kernels
   and the epilogue matches the spec bit for bit, over 36 cases.
 - `isa.py`: instruction mix per loop and resource use, read from the compiler's asm.
 - `model.py`: roofline over VALU / SALU / LDS / L1 / scalar cache / HBM, plus Little's law for
-  memory latency, for the linear layers of a LLaMA-3-8B-sized model.
+  memory latency. It times a whole speculative step: drafter forward, lm_head, target forward,
+  lm_head again. Shapes come from the Hugging Face configs of Qwen3.8-27B, Qwen3.8-Flash-Next
+  and their DFlash2 drafters.
 
 Steady-state K loop, VALU cycles per 512 multiply-adds (pure dot8 = 1.0):
 
@@ -102,20 +104,52 @@ Steady-state K loop, VALU cycles per 512 multiply-adds (pure dot8 = 1.0):
 | 32 | 4.14 (MMQ) | 1.05 | LDS, 5.1 cycles |
 | 64 | 3.78 (MMQ) | 1.03 | LDS, 4.9 cycles |
 
-Predicted verify step (32 layers' linear layers, 1.725 GHz, 0.8 × 1024 GB/s, 1 µs latency):
+DFlash2 drafts a whole block in one pass, and the target verifies one path through it. So a
+block of B tokens means the target runs at T = B. The model cards publish block 8 for 27B
+(4.10-5.46 tokens accepted per step) and block 4 for Flash-Next (2.83-3.26; the card says
+the current sparse-attention code limits it).
 
-| T | today | ×T=1 | W4A4 | ×T=1 | speedup |
-|---|---|---|---|---|---|
-| 1 | 4.81 ms | 1.00 | 4.30 ms | 1.00 | 1.12× |
-| 8 | 6.04 ms | 1.26 | 4.45 ms | 1.04 | 1.36× |
-| 16 | 11.71 ms | 2.44 | 4.62 ms | 1.08 | 2.53× |
-| 32 | 21.61 ms | 4.50 | 5.69 ms | 1.32 | 3.80× |
-| 64 | 41.40 ms | 8.61 | 10.00 ms | 2.33 | 4.14× |
+**Qwen3.8-27B + DFlash2**, one 32 GB MI50 (15.7 GB of q4_0 weights incl. drafter and q6_K
+lm_head), 8K context, 1.725 GHz, 0.8 × 1024 GB/s, 1 µs latency:
 
-Read the shape, not the milliseconds: the model assumes perfect overlap and no bank conflicts,
-and leaves out attention, launch overhead and per-wave setup. Today's path leaves the
-bandwidth floor at T≈4-8; W4A4 stays within 10% of it up to T=16. That holds across latency
-600-1500 ns, bandwidth efficiency 0.65-0.8 and clock 1.4-1.725 GHz, apart from 1.22× at 1500 ns.
+| block T | today step | W4A4 step | speedup |
+|---|---|---|---|
+| 1 (no speculation) | 19.05 ms | 17.26 ms | 1.10× |
+| 8 (model card) | 27.47 ms | 21.44 ms | 1.28× |
+| 16 | 52.36 ms | 25.66 ms | 2.04× |
+| 32 | 96.93 ms | 36.28 ms | 2.67× |
+
+- With the card's acceptance at block 8: 149-199 tok/s today, 191-255 tok/s W4A4.
+- Going to block 16 pays off once it accepts 1.20× more tokens per step than block 8 does.
+  Today's path needs 1.91×. That's where the freed compute shows up: block 16 or a
+  DDTree-style tree over DFlash2's top-16 candidates becomes affordable.
+- Across bandwidth efficiency 0.65-0.8, latency 1-1.5 µs and scalar cache 8-16 B/clk, the
+  block-16 break-even stays at 1.14-1.26×. Long context changes it: attention runs fp16 on
+  both paths and grows with T × context, so break-even is 1.37× at 32K and 1.66× at 128K.
+  At 128K, attention is most of the step.
+
+**Qwen3.8-Flash-Next + DFlash2**, four MI50s (70 GB of q4_0 weights; n-gram embedding table
+assumed in host memory):
+
+| | layer split (llama.cpp default) | tensor split (15 µs all-reduce) |
+|---|---|---|
+| W4A4 speedup at block 4 | 1.09× | 1.06× |
+| tok/s at block 4, today → W4A4 | 268-309 → 292-336 | 651-750 → 687-792 |
+| acceptance needed for block 8 over block 4, today / W4A4 | 1.63× / 1.57× | 1.40× / 1.35× |
+
+W4A4 barely matters here. Each extra token in a verify step pulls in about 10 more experts
+out of 512, so a wider block costs expert weight bandwidth, not compute. With independent
+routing, T=8 reads about 7.5× the expert weights of T=1. Even with half the experts shared
+between draft tokens (`--expert-reuse 0.5`), block 8 needs 1.40× the acceptance.
+
+Read the comparisons, not the milliseconds. The model assumes perfect overlap and no bank
+conflicts. It leaves out launch overhead, norms, convs, router, hyper-connections and the
+drafter's selector. The absolute tok/s are far above what llama.cpp gets on an MI50 today.
+
+On Qwen3.8, W4A4 needs more online Hadamards than OSTQuant's recipe. The attention output
+gate and the DeltaNet z-gate multiply elementwise in front of o_proj / out_proj, and a
+rotation can't be folded through that. The model charges for all three Hadamards, these two
+plus down_proj (about 0.1 ms per 27B step at block 8).
 
 What the asm taught the kernel:
 - Per-token activation addressing cost 2 SALU per token per step. Step-major activations
@@ -129,7 +163,8 @@ Measure on the MI50 before trusting the rest:
 1. `v_dot8_i32_i4` issue rate. Everything assumes one per 4 cycles per wave, like any VALU op.
 2. Achievable HBM bandwidth and latency under load (`--bw-eff`, `--latency`).
 3. Scalar cache bandwidth. Assumed 16 B/clk per 4 CUs. At half that, T ≥ 32 turns
-   scalar-cache-bound (2.0× at T=32); then use R=2 there, which halves it per dot8.
+   scalar-cache-bound (the 27B block-32 step gets 1.35× slower); then use R=2 there, which
+   halves it per dot8.
 4. L2 atomic throughput for split-K (modelled as plain L2 bandwidth).
 
 ## Layout
