@@ -69,6 +69,69 @@ Limits of the hook as it stands:
 - `supports_op` doesn't check types or layout; `rq_scale` assumes contiguous f32.
 - The Rust path measures 8.3 µs for the graph the C++ harness ran in 5.7 µs. Not explained yet.
 
+## MI50 cost model (`gfx906/`)
+
+The plan: W4A4 with `v_dot8_i32_i4` on the MI50 frees enough compute to verify wide
+speculative-decoding trees for about the price of one token. The 3090 can't measure that (its
+int4 tensor cores never run out of compute), so this compiles the real kernels for gfx906,
+counts their instructions, and turns the counts into a verify-step time per width T.
+
+```sh
+nix develop .#rocm -c gfx906/build.sh      # gfx906 asm: llama.cpp q4_0 kernels + ours
+python3 gfx906/model.py --detail 32        # instruction mix + step time vs T
+nix develop -c nvcc -O2 -arch=sm_86 -std=c++17 gfx906/test_skinny.cu -o gfx906/build/test_skinny
+LD_LIBRARY_PATH=/run/opengl-driver/lib gfx906/build/test_skinny   # same kernels on the 3090
+```
+
+- `w4a4_skinny.h`: W4A4 GEMM for T = 1..64. The inner loop is weight loads plus dot8:
+  activations are wave-uniform and feed dot8 from SGPRs. K is split across the waves of a
+  workgroup (reduced in LDS) and across workgroups (int32 atomics, still exact). The same
+  source builds for CUDA with dot8 emulated. On the 3090 it matches a CPU reference exactly,
+  and the epilogue matches the spec bit for bit, over 36 cases.
+- `isa.py`: instruction mix per loop and resource use, read from the compiler's asm.
+- `model.py`: roofline over VALU / SALU / LDS / L1 / scalar cache / HBM, plus Little's law for
+  memory latency, for the linear layers of a LLaMA-3-8B-sized model.
+
+Steady-state K loop, VALU cycles per 512 multiply-adds (pure dot8 = 1.0):
+
+| T | today (q4_0 × q8_1) | W4A4 dot8 | today's real limit |
+|---|---|---|---|
+| 1 | 12.5 (MMVQ) | 1.56 | HBM |
+| 8 | 5.69 (MMVQ) | 1.08 | VALU |
+| 16 | 4.83 (MMQ) | 1.04 | LDS, 5.5 cycles |
+| 32 | 4.14 (MMQ) | 1.05 | LDS, 5.1 cycles |
+| 64 | 3.78 (MMQ) | 1.03 | LDS, 4.9 cycles |
+
+Predicted verify step (32 layers' linear layers, 1.725 GHz, 0.8 × 1024 GB/s, 1 µs latency):
+
+| T | today | ×T=1 | W4A4 | ×T=1 | speedup |
+|---|---|---|---|---|---|
+| 1 | 4.81 ms | 1.00 | 4.30 ms | 1.00 | 1.12× |
+| 8 | 6.04 ms | 1.26 | 4.45 ms | 1.04 | 1.36× |
+| 16 | 11.71 ms | 2.44 | 4.62 ms | 1.08 | 2.53× |
+| 32 | 21.61 ms | 4.50 | 5.69 ms | 1.32 | 3.80× |
+| 64 | 41.40 ms | 8.61 | 10.00 ms | 2.33 | 4.14× |
+
+Read the shape, not the milliseconds: the model assumes perfect overlap and no bank conflicts,
+and leaves out attention, launch overhead and per-wave setup. Today's path leaves the
+bandwidth floor at T≈4-8; W4A4 stays within 10% of it up to T=16. That holds across latency
+600-1500 ns, bandwidth efficiency 0.65-0.8 and clock 1.4-1.725 GHz, apart from 1.22× at 1500 ns.
+
+What the asm taught the kernel:
+- Per-token activation addressing cost 2 SALU per token per step. Step-major activations
+  (`rq_act_index`) make each step one contiguous scalar load.
+- The scheduler hoists all of a step's scalar loads and spills SGPRs through
+  `v_writelane`/`v_readlane`. One `sched_barrier` per token block removes the spills.
+- Split-K partials through L2 cost more than the weights at T=64. Reducing inside the
+  workgroup through LDS first is what keeps T=16-32 near the floor.
+
+Measure on the MI50 before trusting the rest:
+1. `v_dot8_i32_i4` issue rate. Everything assumes one per 4 cycles per wave, like any VALU op.
+2. Achievable HBM bandwidth and latency under load (`--bw-eff`, `--latency`).
+3. Scalar cache bandwidth. Assumed 16 B/clk per 4 CUs. At half that, T ≥ 32 turns
+   scalar-cache-bound (2.0× at T=32); then use R=2 there, which halves it per dot8.
+4. L2 atomic throughput for split-K (modelled as plain L2 bandwidth).
+
 ## Layout
 
 ```
@@ -80,6 +143,7 @@ src/quant.rs        Q4_0 matmul on every device, checked against CPU
 kernels/*.cu        our CUDA kernels (nvcc -arch=native, via build.rs)
 build.rs            bindgen, kernels, link, kernels/compile_flags.txt for clangd
 build-ggml.sh       applies the patch if missing, builds third_party/llama.cpp
+gfx906/             MI50 cost model: gfx906 asm, instruction counts, step-time model
 patches/            our changes to third_party/llama.cpp
 third_party/        llama.cpp as vendored by llama-cpp-sys-2 0.1.160 (ggml 0.26.0), patched
 run.sh              dev runner (LD_LIBRARY_PATH)
@@ -107,5 +171,5 @@ MI50's `v_dot8_i32_i4` pipeline. Separate project, not wired into ruquant.
 
 ## Parked
 
-ROCm/HIP: the toolchain works in a devShell (`hipcc` 7.2.4), but there is no AMD GPU here to
-run it on. Removed until there is.
+ROCm/HIP at runtime: there is no AMD GPU here. `nix develop .#rocm` (`hipcc` 7.2.4) is
+compile-only, for `gfx906/`.
