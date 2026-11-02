@@ -1,0 +1,14 @@
+[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (297193 > 262144). Running this sequence through the model will result in indexing errors
+wikitext-2 test: 297193 tokens, evaluating 64 x 2048 = 131072; layers 64; configs bf16, bf16-rot, w4a16, w4a4, w4a8-rot, w4a4-rot, w4a4-rot-gptq
+layer  0 (linear)  37.1 s  bf16-rot 0.0038  w4a16 0.0860  w4a4 0.2819  w4a8-rot 0.0556  w4a4-rot 0.0784  w4a4-rot-gptq 0.0507
+layer  1 (linear)  37.4 s  bf16-rot 0.0049  w4a16 0.0717  w4a4 0.3419  w4a8-rot 0.0789  w4a4-rot 0.1087  w4a4-rot-gptq 0.0647
+layer  2 (linear)  37.8 s  bf16-rot 0.0074  w4a16 0.1115  w4a4 0.4439  w4a8-rot 0.1233  w4a4-rot 0.1590  w4a4-rot-gptq 0.0935
+layer  3 (full_a)  35.8 s  bf16-rot 0.0063  w4a16 0.0829  w4a4 0.4749  w4a8-rot 0.1076  w4a4-rot 0.1371  w4a4-rot-gptq 0.0792
+layer  4 (linear)  37.8 s  bf16-rot 0.0070  w4a16 0.0897  w4a4 0.5374  w4a8-rot 0.1336  w4a4-rot 0.1668  w4a4-rot-gptq 0.0951
+layer  5 (linear)  37.0 s  bf16-rot 0.0076  w4a16 0.0956  w4a4 0.5245  w4a8-rot 0.1474  w4a4-rot 0.1867  w4a4-rot-gptq 0.1071
+layer  6 (linear)  37.1 s  bf16-rot 0.0085  w4a16 0.1043  w4a4 0.5762  w4a8-rot 0.1617  w4a4-rot 0.2069  w4a4-rot-gptq 0.1208
+layer  7 (full_a)  34.8 s  bf16-rot 0.0083  w4a16 0.0999  w4a4 0.5982  w4a8-rot 0.1582  w4a4-rot 0.2043  w4a4-rot-gptq 0.1193
+layer  8 (linear)  37.0 s  bf16-rot 0.0084  w4a16 0.0965  w4a4 0.5866  w4a8-rot 0.1579  w4a4-rot 0.2046  w4a4-rot-gptq 0.1206
+layer  9 (linear)  37.1 s  bf16-rot 0.0086  w4a16 0.0964  w4a4 0.5822  w4a8-rot 0.1601  w4a4-rot 0.2075  w4a4-rot-gptq 0.1228
+layer 10 (linear)  37.1 s  bf16-rot 0.0090  w4a16 0.1001  w4a4 0.5954  w4a8-rot 0.1640  w4a4-rot 0.2133  w4a4-rot-gptq 0.1270
+layer 11 (full_a)  34.9 s  bf16-rot 0.0087  w4a16 0.0936  w4a4 0.5619  w4a8-rot 0.1544  w4a4-rot 0.2012  w4a4-rot-gptq 0.1199

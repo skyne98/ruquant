@@ -1,0 +1,1703 @@
+diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index 224bdef..c2cae6e 100644
+--- a/ggml/include/ggml.h
++++ b/ggml/include/ggml.h
+@@ -430,7 +430,12 @@ extern "C" {
+         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
+         GGML_TYPE_Q1_0    = 41,
+         GGML_TYPE_Q2_0    = 42,
+-        GGML_TYPE_COUNT   = 43,
++        // 43: GGML_TYPE_F8_E4M3 upstream; kept free so ruquant GGUFs use the same type ids everywhere
++        GGML_TYPE_W4A4    = 44, // ruquant: int4 per-row weights x int4 per-token activations (dot8 / int4 mma)
++        GGML_TYPE_W4A4H   = 45, // ruquant: W4A4 with an online Hadamard on the activations
++        GGML_TYPE_A4      = 46, // ruquant: per-token asymmetric int4 activations, the vec_dot type of W4A4
++        GGML_TYPE_A4H     = 47, // ruquant: A4 after the online Hadamard, the vec_dot type of W4A4H
++        GGML_TYPE_COUNT   = 48,
+     };
+ 
+     // [TAG_GGML_PREC]
+diff --git a/ggml/src/ggml-common.h b/ggml/src/ggml-common.h
+index 1dbbe32..8873cd4 100644
+--- a/ggml/src/ggml-common.h
++++ b/ggml/src/ggml-common.h
+@@ -248,6 +248,21 @@ typedef struct {
+ } block_q5_1;
+ static_assert(sizeof(block_q5_1) == 2 * sizeof(ggml_half) + sizeof(uint32_t) + QK5_1 / 2, "wrong q5_1 block size/padding");
+ 
++// ruquant W4A4. A row of K (a multiple of 256) int4 codes in [-8, 7] with one fp32 scale per row,
++// stored as K/256 blocks. Every block of a row repeats the row's header, so blocks stay self-contained
++// and the codes stay 16-byte aligned for vector loads. Element 8w+j sits in bits [4j+3:4j] of qs[w].
++//   weights:     d = per-row scale s_w, sum = sum of the row's codes over all of K
++//   activations: d = per-token scale s_a, sum = zero point z in [0, 15]; codes are q - 8
++// y = fp32((fp32(acc + (8 - z) * colsum) * s_a) * s_w), acc = sum of code products (int32).
++#define QK_W4A4 256
++typedef struct {
++    float    d;
++    int32_t  sum;
++    int32_t  pad[2];
++    uint32_t qs[QK_W4A4 / 8];
++} block_w4a4;
++static_assert(sizeof(block_w4a4) == 144, "wrong w4a4 block size/padding");
++
+ #define QK8_0 32
+ typedef struct {
+     ggml_half d;       // delta
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index 5428d51..258e258 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -7,6 +7,7 @@
+ #include "ggml-cpu-impl.h"
+ #include "ggml-impl.h"
+ #include "quants.h"
++#include "ggml-quants.h" // ruquant W4A4 reference quantizers
+ #include "ggml-threading.h"
+ #include "unary-ops.h"
+ #include "binary-ops.h"
+@@ -269,6 +270,24 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
+         .vec_dot_type             = GGML_TYPE_Q8_1,
+         .nrows                    = 1,
+     },
++    [GGML_TYPE_W4A4] = {
++        .from_float               = (ggml_from_float_t) quantize_row_w4a4_ref,
++        .vec_dot                  = ggml_vec_dot_w4a4_a4,
++        .vec_dot_type             = GGML_TYPE_A4,
++        .nrows                    = 1,
++    },
++    [GGML_TYPE_W4A4H] = {
++        .from_float               = (ggml_from_float_t) quantize_row_w4a4h_ref,
++        .vec_dot                  = ggml_vec_dot_w4a4_a4,
++        .vec_dot_type             = GGML_TYPE_A4H,
++        .nrows                    = 1,
++    },
++    [GGML_TYPE_A4] = {
++        .from_float               = (ggml_from_float_t) quantize_row_a4_ref,
++    },
++    [GGML_TYPE_A4H] = {
++        .from_float               = (ggml_from_float_t) quantize_row_a4h_ref,
++    },
+     [GGML_TYPE_Q8_0] = {
+         .from_float               = quantize_row_q8_0,
+         .vec_dot                  = ggml_vec_dot_q8_0_q8_0,
+@@ -1340,17 +1359,20 @@ UseGgmlGemm1:;
+         GGML_ASSERT(!widen || vec_dot_type == GGML_TYPE_F32);
+         GGML_ASSERT(!widen || src1->type == GGML_TYPE_F16 || src1->type == GGML_TYPE_BF16);
+ 
+-    #if 0
+-        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+-            for (int64_t i12 = 0; i12 < ne12; ++i12) {
+-                for (int64_t i11 = ith; i11 < ne11; i11 += nth) {
+-                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
+-                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1),
+-                                ne10);
++        // ruquant A4 / A4H quantize per token (min/max and Hadamard over the whole row): rows per thread
++        if (vec_dot_type == GGML_TYPE_A4 || vec_dot_type == GGML_TYPE_A4H) {
++            const bool had = vec_dot_type == GGML_TYPE_A4H;
++            const float clip = ggml_rq_act_clip_for(ggml_rq_tensor_clip(src0->data), had); // the weight's clip
++            for (int64_t i13 = 0; i13 < ne13; ++i13) {
++                for (int64_t i12 = 0; i12 < ne12; ++i12) {
++                    for (int64_t i11 = ith; i11 < ne11; i11 += nth) {
++                        (had ? quantize_row_a4h_clip : quantize_row_a4_clip)(
++                            (float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
++                            (block_w4a4 *)    (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1), ne10, clip);
++                    }
+                 }
+             }
+-        }
+-    #else
++        } else {
+         const int64_t bs = ggml_blck_size(vec_dot_type);
+ 
+         for (int64_t i13 = 0; i13 < ne13; ++i13) {
+@@ -1373,7 +1395,7 @@ UseGgmlGemm1:;
+                 }
+             }
+         }
+-    #endif
++        }
+     }
+ 
+     if (ith == 0) {
+diff --git a/ggml/src/ggml-cpu/quants.c b/ggml/src/ggml-cpu/quants.c
+index 5e36459..5390d3f 100644
+--- a/ggml/src/ggml-cpu/quants.c
++++ b/ggml/src/ggml-cpu/quants.c
+@@ -448,6 +448,30 @@ void ggml_vec_dot_q5_1_q8_1_generic(int n, float * GGML_RESTRICT s, size_t bs, c
+     *s = sumf;
+ }
+ 
++// ruquant W4A4: x is one weight row (W4A4 / W4A4H), y one activation row (A4 / A4H), n = K.
++// Integer accumulation is exact; the epilogue is the spec's fp32 sequence.
++void ggml_vec_dot_w4a4_a4(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
++    assert(nrc == 1);
++    assert(n % QK_W4A4 == 0);
++    UNUSED(nrc); UNUSED(bs); UNUSED(bx); UNUSED(by);
++    const block_w4a4 * GGML_RESTRICT x = vx;
++    const block_w4a4 * GGML_RESTRICT y = vy;
++    const int nb = n / QK_W4A4;
++    int32_t acc = 0;
++    for (int b = 0; b < nb; ++b) {
++        for (int w = 0; w < QK_W4A4 / 8; ++w) {
++            const uint32_t wx = x[b].qs[w], wy = y[b].qs[w];
++            for (int j = 0; j < 8; ++j) {
++                const int32_t cx = (int32_t) (((wx >> (4*j)) & 0xF) << 28) >> 28;
++                const int32_t cy = (int32_t) (((wy >> (4*j)) & 0xF) << 28) >> 28;
++                acc += cx * cy;
++            }
++        }
++    }
++    const int32_t corr = acc + (8 - y[0].sum) * x[0].sum;
++    *s = ((float) corr * y[0].d) * x[0].d;
++}
++
+ void ggml_vec_dot_q8_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+     const int qk = QK8_0;
+     const int nb = n / qk;
+diff --git a/ggml/src/ggml-cpu/quants.h b/ggml/src/ggml-cpu/quants.h
+index 93ea7ee..d1b103f 100644
+--- a/ggml/src/ggml-cpu/quants.h
++++ b/ggml/src/ggml-cpu/quants.h
+@@ -45,6 +45,7 @@ void ggml_vec_dot_q4_1_q8_1(int n, float * GGML_RESTRICT s, size_t bs, const voi
+ void ggml_vec_dot_q5_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ void ggml_vec_dot_q5_1_q8_1(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ void ggml_vec_dot_q8_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
++void ggml_vec_dot_w4a4_a4(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ 
+ void ggml_vec_dot_mxfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+ void ggml_vec_dot_nvfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index c48b56f..4fc32a2 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -27,6 +27,7 @@
+ #include "ggml-cuda/diag.cuh"
+ #include "ggml-cuda/fattn.cuh"
+ #include "ggml-cuda/fwht.cuh"
++#include "ggml-cuda/rq-w4a4.cuh"
+ #include "ggml-cuda/getrows.cuh"
+ #include "ggml-cuda/im2col.cuh"
+ #include "ggml-cuda/mmf.cuh"
+@@ -2647,7 +2648,8 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+                                    src0->view_src;
+ 
+     bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !bad_padding_clear && src1->type == GGML_TYPE_F32 &&
+-                             dst->type == GGML_TYPE_F32 && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE;
++                             dst->type == GGML_TYPE_F32 && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE &&
++                             src0->type != GGML_TYPE_W4A4 && src0->type != GGML_TYPE_W4A4H; // ruquant: rq-w4a4.cu
+ 
+     // fusion is not universally faster on Pascal
+     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+@@ -2832,6 +2834,11 @@ static bool ggml_cuda_match_shared_expert(const ggml_cgraph * graph, int routed_
+ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+     GGML_TENSOR_BINARY_OP_LOCALS
+ 
++    if (src0->type == GGML_TYPE_W4A4 || src0->type == GGML_TYPE_W4A4H) { // ruquant
++        ggml_cuda_mul_mat_rq_w4a4(ctx, src0, src1, dst);
++        return;
++    }
++
+     if (ggml_cuda_op_mul_mat_use_fwht(dst) && ggml_cuda_op_fwht(ctx, src1, dst)) {
+         return;
+     }
+@@ -3083,6 +3090,18 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor *
+         nb1, nb2, nb3, stream);
+ }
+ 
++// ---- RUQUANT patch: begin ----
++// Custom-kernel hook. kernels/ registers a launcher; ggml_cuda_compute_forward runs inside
++// ggml_cuda_graph_evaluate_and_capture, so the launch lands in the captured CUDA graph and is
++// replayed with everything else instead of costing a launch + event per step.
++typedef void (* ggml_cuda_custom1_fn)(cudaStream_t stream, struct ggml_tensor * dst);
++static ggml_cuda_custom1_fn g_rq_custom1 = nullptr;
++
++extern "C" GGML_BACKEND_API void ggml_cuda_set_custom1_hook(ggml_cuda_custom1_fn fn) {
++    g_rq_custom1 = fn;
++}
++// ---- RUQUANT patch: end ----
++
+ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {
+     switch (dst->op) {
+         case GGML_OP_ARGMAX:
+@@ -3434,6 +3453,12 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+         case GGML_OP_LIGHTNING_INDEXER:
+             ggml_cuda_lightning_indexer(ctx, dst);
+             break;
++        case GGML_OP_MAP_CUSTOM1: // ---- RUQUANT patch
++            if (g_rq_custom1 == nullptr) {
++                return false;
++            }
++            g_rq_custom1(ctx.stream(), dst);
++            break;
+         default:
+             return false;
+     }
+@@ -3767,6 +3792,12 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
+             continue;
+         }
+ 
++        // ruquant: a W4A4 weight is repacked in place on first use, which must run outside a graph
++        if (node->op == GGML_OP_MUL_MAT && (node->src[0]->type == GGML_TYPE_W4A4 || node->src[0]->type == GGML_TYPE_W4A4H) &&
++            !ggml_cuda_rq_w4a4_ready(node->src[0])) {
++            use_cuda_graph = false;
++        }
++
+         // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
+         if (node->op == GGML_OP_MUL_MAT_ID) {
+             const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+@@ -6728,6 +6759,9 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
+ 
+ // TODO: move these functions here
+ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
++    if (op->op == GGML_OP_MAP_CUSTOM1) {
++        return g_rq_custom1 != nullptr; // ---- RUQUANT patch
++    }
+     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
+ 
+     // check if all the sources are allocated on this device
+@@ -6846,6 +6880,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+                     }
+                 }
+ #endif // GGML_USE_MUSA
++                if (a->type == GGML_TYPE_W4A4 || a->type == GGML_TYPE_W4A4H) { // ruquant
++                    return op->op == GGML_OP_MUL_MAT &&
++                        ggml_cuda_rq_w4a4_supported(ggml_cuda_info().devices[dev_ctx->device].cc, a, b, op);
++                }
+                 switch (a->type) {
+                     case GGML_TYPE_F32:
+                     case GGML_TYPE_F16:
+diff --git a/ggml/src/ggml-cuda/mmf.cu b/ggml/src/ggml-cuda/mmf.cu
+index 646a589..a68e2f4 100644
+--- a/ggml/src/ggml-cuda/mmf.cu
++++ b/ggml/src/ggml-cuda/mmf.cu
+@@ -132,6 +132,9 @@ void ggml_cuda_mul_mat_f(ggml_backend_cuda_context & ctx, const ggml_tensor * sr
+ 
+ bool ggml_cuda_should_use_mmf(enum ggml_type type, int cc, int warp_size, const int64_t * src0_ne,
+         const size_t * src0_nb, const int src1_ncols, bool mul_mat_id) {
++    if (type == GGML_TYPE_W4A4 || type == GGML_TYPE_W4A4H) {
++        return false; // ruquant: its own path, rq-w4a4.cu
++    }
+     if (ggml_is_quantized(type)) {
+         return false;
+     }
+diff --git a/ggml/src/ggml-cuda/mmq.cu b/ggml/src/ggml-cuda/mmq.cu
+index 00ab924..e79891e 100644
+--- a/ggml/src/ggml-cuda/mmq.cu
++++ b/ggml/src/ggml-cuda/mmq.cu
+@@ -477,6 +477,9 @@ void ggml_cuda_mul_mat_q(
+ }
+ 
+ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t n_experts) {
++    if (type == GGML_TYPE_W4A4 || type == GGML_TYPE_W4A4H) {
++        return false; // ruquant: its own path, rq-w4a4.cu
++    }
+ #ifdef GGML_CUDA_FORCE_CUBLAS
+     return false;
+ #endif // GGML_CUDA_FORCE_CUBLAS
+diff --git a/ggml/src/ggml-cuda/mmvf.cu b/ggml/src/ggml-cuda/mmvf.cu
+index d0a572e..4eb6dec 100644
+--- a/ggml/src/ggml-cuda/mmvf.cu
++++ b/ggml/src/ggml-cuda/mmvf.cu
+@@ -791,6 +791,9 @@ void ggml_cuda_op_mul_mat_vec_f(
+ }
+ 
+ bool ggml_cuda_should_use_mmvf(enum ggml_type type, int cc, int warp_size, const int64_t * src0_ne, const size_t * src0_nb, int64_t ne11) {
++    if (type == GGML_TYPE_W4A4 || type == GGML_TYPE_W4A4H) {
++        return false; // ruquant: its own path, rq-w4a4.cu
++    }
+     if (src0_ne[0] % 2 != 0) {
+         return false;
+     }
+diff --git a/ggml/src/ggml-cuda/mmvq.cu b/ggml/src/ggml-cuda/mmvq.cu
+index 44e820e..459a563 100644
+--- a/ggml/src/ggml-cuda/mmvq.cu
++++ b/ggml/src/ggml-cuda/mmvq.cu
+@@ -316,6 +316,9 @@ int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
+ }
+ 
+ bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
++    if (type == GGML_TYPE_W4A4 || type == GGML_TYPE_W4A4H) {
++        return false; // ruquant: its own path, rq-w4a4.cu
++    }
+     if (!ggml_is_quantized(type)) {
+         return false;
+     }
+diff --git a/ggml/src/ggml-cuda/rq-w4a4-skinny.cuh b/ggml/src/ggml-cuda/rq-w4a4-skinny.cuh
+new file mode 100644
+index 0000000..28770db
+--- /dev/null
++++ b/ggml/src/ggml-cuda/rq-w4a4-skinny.cuh
+@@ -0,0 +1,249 @@
++#pragma once
++// ruquant skinny W4A4 GEMM for decode / speculative-verify widths (T = 1..64 tokens), shaped for gfx906
++// (from ruquant's gfx906/w4a4_skinny.h, measured on MI50).
++//
++// gfx906 has no matrix unit, so every instruction that is not v_dot8_i32_i4 takes a VALU slot that could
++// have done 8 multiply-adds. The inner loop is therefore weight loads + dot8 only:
++//   - each lane owns one output channel per channel group (R groups per wave): no cross-lane reduction;
++//   - activations are wave-uniform, so they come in through scalar loads and feed dot8 from SGPRs. They are
++//     stored step-major so one step's T*KA words are contiguous;
++//   - weights are repacked (once, in place, on first use) so a wave's load is one contiguous 16 B/lane run;
++//   - split-K in two levels: the waves of a workgroup reduce through LDS, workgroups add int32 partials
++//     atomically. Integer adds are exact, so the result is bit-exact with the CPU reference.
++// On CUDA (wave = 32, dot8 emulated) the same source runs on the 3090 to check the indexing (RQ_SKINNY=1).
++#include <stddef.h>
++#include <stdint.h>
++
++#if defined(GGML_USE_HIP)
++#define RQ_WAVE 64
++static __device__ __forceinline__ int rq_dot8(int a, int b, int c) {
++#if defined(__gfx906__)
++    return __builtin_amdgcn_sdot8(a, b, c, false); // v_dot8_i32_i4
++#else
++#pragma unroll
++    for (int j = 0; j < 8; ++j) c += ((a << (28 - 4 * j)) >> 28) * ((b << (28 - 4 * j)) >> 28);
++    return c;
++#endif
++}
++// Without this the scheduler hoists every token block's s_loads to the top of the step, which needs more
++// SGPRs than a wave has and spills them through v_writelane/v_readlane.
++static __device__ __forceinline__ void rq_block_fence() {
++#if defined(__HIP_DEVICE_COMPILE__)
++    __builtin_amdgcn_sched_barrier(0);
++#endif
++}
++// wave index in an SGPR, so per-wave K offsets keep the activation loads scalar
++static __device__ __forceinline__ int rq_wave_id() {
++#if defined(__HIP_DEVICE_COMPILE__)
++    return __builtin_amdgcn_readfirstlane(threadIdx.x / RQ_WAVE);
++#else
++    return threadIdx.x / RQ_WAVE;
++#endif
++}
++#else
++#define RQ_WAVE 32
++static __device__ __forceinline__ int rq_dot8(int a, int b, int c) {
++#pragma unroll
++    for (int j = 0; j < 8; ++j) c += ((a << (28 - 4 * j)) >> 28) * ((b << (28 - 4 * j)) >> 28);
++    return c;
++}
++static __device__ __forceinline__ void rq_block_fence() {}
++static __device__ __forceinline__ int rq_wave_id() { return threadIdx.x / RQ_WAVE; }
++#endif
++
++// a load that skips the (non-coherent) L1, for data other workgroups just wrote
++static __device__ __forceinline__ int32_t rq_load_l2(const int32_t * p) {
++#if defined(GGML_USE_HIP)
++    return __builtin_nontemporal_load(p);
++#else
++    return __ldcg(p);
++#endif
++}
++
++template <int N> struct alignas(16) rq_words {
++    int32_t v[N];
++};
++
++// Weights, 4 k-words (32 int4) per lane per step: Wt[group][step][lane][4], group = channel / RQ_WAVE
++constexpr int RQ_KW = 4;
++static __host__ __device__ __forceinline__ size_t rq_wt_index(int channel, int k_word, int Kw) {
++    const int group = channel / RQ_WAVE, lane = channel % RQ_WAVE;
++    return (((size_t) group * (Kw / RQ_KW) + k_word / RQ_KW) * RQ_WAVE + lane) * RQ_KW + k_word % RQ_KW;
++}
++
++// Verify-width presets: R channel groups per wave, KA activation words per token per chunk, TB tokens per
++// scalar load. Picked from the gfx906 asm: fewest instructions per dot8 without SGPR spills.
++template <int T> struct rq_cfg;
++template <> struct rq_cfg<1>  { static constexpr int R = 4, KA = 4, TB = 1; };
++template <> struct rq_cfg<2>  { static constexpr int R = 4, KA = 4, TB = 2; };
++template <> struct rq_cfg<4>  { static constexpr int R = 4, KA = 4, TB = 4; };
++template <> struct rq_cfg<8>  { static constexpr int R = 2, KA = 4, TB = 8; };
++template <> struct rq_cfg<16> { static constexpr int R = 2, KA = 4, TB = 16; };
++template <> struct rq_cfg<24> { static constexpr int R = 1, KA = 1, TB = 24; };
++template <> struct rq_cfg<32> { static constexpr int R = 1, KA = 1, TB = 32; };
++template <> struct rq_cfg<48> { static constexpr int R = 1, KA = 1, TB = 24; };
++template <> struct rq_cfg<64> { static constexpr int R = 1, KA = 1, TB = 32; };
++
++// Activations, step-major: Ac[chunk][t][KA], chunk = k_word / KA
++static __host__ __device__ __forceinline__ size_t rq_act_index(int t, int k_word, int T, int KA) {
++    return ((size_t) (k_word / KA) * T + t) * KA + k_word % KA;
++}
++
++// The spec epilogue, fused: y = (fp32(acc + (8 - z) * colsum) * s_a) * s_w into D [M][ldd], for the M real tokens.
++// With split-K (gridDim.y > 1) the workgroups add into acc [M][N] in L2 (integers: any order is exact) and bump
++// cnt[blockIdx.x]; the last one to arrive reads the totals and writes D. acc and cnt start at zero (the activation
++// quantizer clears them).
++struct rq_epi {
++    const float * s_a;
++    const int32_t * z;
++    const float * sw;
++    const int32_t * colsum;
++    float * D;
++    int ldd;
++    int M;
++    int32_t * cnt;
++};
++
++static __device__ __forceinline__ float rq_epi_value(const rq_epi & e, int32_t acc, int t, int n) {
++    const int c = acc + (8 - e.z[t]) * e.colsum[n];
++    return __fmul_rn(__fmul_rn(__int2float_rn(c), e.s_a[t]), e.sw[n]);
++}
++
++template <int T, int R> constexpr size_t rq_lds_bytes(int W) {
++    return W > 1 ? (size_t) R * T * RQ_WAVE * sizeof(int32_t) : 0;
++}
++
++// Ac: activation words (element 8w+j in bits [4j+3:4j], stored as q-8), rq_act_index
++// Wt: weight words, rq_wt_index
++// acc: [M][N] int32 split-K sums (gridDim.y > 1), epi: the fused epilogue (see rq_epi).
++// grid (N / (RQ_WAVE*R), ceil(Kw / kw_split)), block RQ_WAVE*W (W <= 8), rq_lds_bytes<T, R>(W) dynamic LDS;
++// Kw and kw_split multiples of 4.
++// PF: activations one token block ahead, from T = 24 where a block is only 32 dot8s.
++template <int T, int R, int KA = rq_cfg<T>::KA, int TB = rq_cfg<T>::TB, bool PF = (T >= 24 && TB * KA <= 32)>
++static __global__ void __launch_bounds__(RQ_WAVE * 8)
++rq_skinny_kernel(const int32_t * __restrict__ Ac, const int32_t * __restrict__ Wt, int32_t * __restrict__ acc,
++                 int N, int Kw, int kw_split, const rq_epi epi) {
++    static_assert(RQ_KW % KA == 0 && T % TB == 0, "bad preset");
++    constexpr int CHUNKS = RQ_KW / KA;
++    constexpr int NB = CHUNKS * (T / TB); // token blocks per step
++    const int lane = threadIdx.x % RQ_WAVE;
++    const int wave = rq_wave_id(), W = blockDim.x / RQ_WAVE;
++    const int g0 = blockIdx.x * R;
++    const int wg_begin = blockIdx.y * kw_split;
++    const int wg_steps = (min(wg_begin + kw_split, Kw) - wg_begin) / RQ_KW;
++    const int per_wave = (wg_steps + W - 1) / W;
++    const int s_lo = min(wave * per_wave, wg_steps);
++    const int steps = min(s_lo + per_wave, wg_steps) - s_lo;
++    const int w_begin = wg_begin + s_lo * RQ_KW;
++
++    const rq_words<RQ_KW> * wp[R];
++#pragma unroll
++    for (int r = 0; r < R; ++r) {
++        wp[r] = reinterpret_cast<const rq_words<RQ_KW> *>(Wt) +
++                ((size_t) (g0 + r) * (Kw / RQ_KW) + w_begin / RQ_KW) * RQ_WAVE + lane;
++    }
++    const rq_words<TB * KA> * ap = reinterpret_cast<const rq_words<TB * KA> *>(Ac) + (size_t) (w_begin / KA) * (T / TB);
++
++    int sum[R][T];
++#pragma unroll
++    for (int r = 0; r < R; ++r)
++#pragma unroll
++        for (int t = 0; t < T; ++t) sum[r][t] = 0;
++
++    // software pipeline: the next step's weights are in flight while this step's dot8s run
++    rq_words<RQ_KW> cur[R], nxt[R];
++    if (steps > 0)
++#pragma unroll
++        for (int r = 0; r < R; ++r) cur[r] = wp[r][0];
++
++    const int nblocks = steps * NB;
++    rq_words<TB * KA> a_cur;
++    if (PF && steps > 0) a_cur = ap[0];
++
++    for (int s = 0; s < steps; ++s) {
++        const int s_next = s + 1 < steps ? s + 1 : s; // last step re-reads, no branch
++#pragma unroll
++        for (int r = 0; r < R; ++r) nxt[r] = wp[r][(size_t) s_next * RQ_WAVE];
++
++#pragma unroll
++        for (int q = 0; q < NB; ++q) {
++            const int c = q / (T / TB), b = q % (T / TB);
++            const int qi = s * NB + q;
++            rq_words<TB * KA> a, a_nxt;
++            if (PF) {
++                a = a_cur;
++                sum[0][b * TB] = rq_dot8(a.v[0], cur[0].v[c * KA], sum[0][b * TB]);
++                rq_block_fence();
++                a_nxt = ap[qi + 1 < nblocks ? qi + 1 : qi]; // last block re-reads, no branch
++            } else {
++                a = ap[qi];
++            }
++#pragma unroll
++            for (int tt = 0; tt < TB; ++tt)
++#pragma unroll
++                for (int r = 0; r < R; ++r)
++#pragma unroll
++                    for (int j = 0; j < KA; ++j) {
++                        if (PF && tt == 0 && r == 0 && j == 0) continue; // done above
++                        const int t = b * TB + tt;
++                        sum[r][t] = rq_dot8(a.v[tt * KA + j], cur[r].v[c * KA + j], sum[r][t]);
++                    }
++            rq_block_fence();
++            if (PF) a_cur = a_nxt;
++        }
++#pragma unroll
++        for (int r = 0; r < R; ++r) cur[r] = nxt[r];
++    }
++
++    // reduce the workgroup's K slices in one LDS buffer: wave 0 stores, the other waves add atomically
++    extern __shared__ int32_t rq_lds[];
++    if (W > 1) {
++        if (wave == 0)
++#pragma unroll
++            for (int r = 0; r < R; ++r)
++#pragma unroll
++                for (int t = 0; t < T; ++t) rq_lds[(r * T + t) * RQ_WAVE + lane] = sum[r][t];
++        __syncthreads();
++        if (wave > 0)
++#pragma unroll
++            for (int r = 0; r < R; ++r)
++#pragma unroll
++                for (int t = 0; t < T; ++t) atomicAdd(&rq_lds[(r * T + t) * RQ_WAVE + lane], sum[r][t]);
++        __syncthreads();
++        if (wave == 0)
++#pragma unroll
++            for (int r = 0; r < R; ++r)
++#pragma unroll
++                for (int t = 0; t < T; ++t) sum[r][t] = rq_lds[(r * T + t) * RQ_WAVE + lane];
++    }
++    if (wave != 0) return;
++    if (gridDim.y == 1) {
++#pragma unroll
++        for (int r = 0; r < R; ++r)
++#pragma unroll
++            for (int t = 0; t < T; ++t) {
++                const int n = (g0 + r) * RQ_WAVE + lane;
++                if (t < epi.M) epi.D[(size_t) t * epi.ldd + n] = rq_epi_value(epi, sum[r][t], t, n);
++            }
++        return;
++    }
++#pragma unroll
++    for (int r = 0; r < R; ++r)
++#pragma unroll
++        for (int t = 0; t < T; ++t) {
++            if (t < epi.M) atomicAdd(&acc[(size_t) t * N + (g0 + r) * RQ_WAVE + lane], sum[r][t]);
++        }
++    __threadfence();
++    int prev = 0;
++    if (lane == 0) prev = atomicAdd(&epi.cnt[blockIdx.x], 1);
++    prev = __shfl_sync(0xffffffff, prev, 0, RQ_WAVE);
++    if (prev != (int) gridDim.y - 1) return;
++    __threadfence();
++#pragma unroll
++    for (int r = 0; r < R; ++r)
++#pragma unroll
++        for (int t = 0; t < T; ++t) {
++            const int n = (g0 + r) * RQ_WAVE + lane;
++            if (t < epi.M) epi.D[(size_t) t * epi.ldd + n] = rq_epi_value(epi, rq_load_l2(&acc[(size_t) t * N + n]), t, n);
++        }
++}
+diff --git a/ggml/src/ggml-cuda/rq-w4a4.cu b/ggml/src/ggml-cuda/rq-w4a4.cu
+new file mode 100644
+index 0000000..9b5d721
+--- /dev/null
++++ b/ggml/src/ggml-cuda/rq-w4a4.cu
+@@ -0,0 +1,639 @@
++#include "rq-w4a4.cuh"
++#if defined(GGML_USE_HIP)
++#pragma clang fp contract(off) // the _rn intrinsics below are plain ops on HIP: keep mul + add unfused
++#endif
++#include "rq-w4a4-skinny.cuh"
++
++extern "C" float ggml_rq_act_clip_for(float tensor_clip, bool hadamard); // ggml-quants.c
++
++// ruquant W4A4 on CUDA. Numerics follow the CPU reference in ggml-quants.c op for op (explicit _rn
++// intrinsics, same Hadamard summation order), so CPU and CUDA give identical outputs. The GEMM is
++// mma.m16n8k64 s4 (sm_80+), from mi50emu's sm_86 kernel, reading the weight codes in place.
++
++// same factorization as ggml_rq_hadamard_factor (ggml-quants.c)
++static bool rq_factor(int64_t n, int & p, int & m) {
++    for (int pp = 1; pp <= 128 && pp <= n; ++pp) {
++        if (pp > 1) {
++            if (pp % 4 != 0 || (pp - 1) % 4 != 3) continue;
++            bool prime = pp - 1 >= 2;
++            for (int d = 2; d * d <= pp - 1; ++d) if ((pp - 1) % d == 0) { prime = false; break; }
++            if (!prime) continue;
++        }
++        if (n % pp != 0) continue;
++        const int64_t mm = n / pp;
++        if (mm & (mm - 1)) continue;
++        p = pp;
++        m = (int) mm;
++        return true;
++    }
++    return false;
++}
++
++// ---------------------------------------------------------------------------- online Hadamard
++// Sylvester over each chunk of m, from src (row stride lds) into x (row stride ldx), then x *= scale if there is
++// no Paley stage
++static __global__ void rq_fwht_kernel(const float * __restrict__ src, int lds, float * __restrict__ x, int ldx, int m, int p,
++                                      float scale) {
++    extern __shared__ float buf[];
++    const float * in = src + (size_t) blockIdx.x * lds + (size_t) blockIdx.y * m;
++    float * row = x + (size_t) blockIdx.x * ldx + (size_t) blockIdx.y * m;
++    for (int i = threadIdx.x; i < m; i += blockDim.x) buf[i] = in[i];
++    for (int h = 1; h < m; h <<= 1) {
++        __syncthreads();
++        for (int t = threadIdx.x; t < m / 2; t += blockDim.x) {
++            const int j = (t / h) * 2 * h + (t % h);
++            const float a = buf[j], b = buf[j + h];
++            buf[j]     = __fadd_rn(a, b);
++            buf[j + h] = __fsub_rn(a, b);
++        }
++    }
++    __syncthreads();
++    for (int i = threadIdx.x; i < m; i += blockDim.x) row[i] = p == 1 ? __fmul_rn(buf[i], scale) : buf[i];
++}
++
++// Paley across the p chunks: y[a] = sum_i x[i] A[i][a], i ascending from 0, then *= scale.
++// A = I + S with S[0][j>0] = 1, S[i>0][0] = -1, S[i][j] = chi(j - i mod q). One thread per column j.
++static __global__ void rq_paley_kernel(float * __restrict__ x, int ldx, int m, int p, float scale) {
++    __shared__ int8_t chi[128];
++    const int q = p - 1;
++    for (int i = threadIdx.x; i < q; i += blockDim.x) chi[i] = i == 0 ? 0 : -1;
++    __syncthreads();
++    if (threadIdx.x == 0) for (int i = 1; i < q; ++i) chi[(i * i) % q] = 1;
++    __syncthreads();
++    const int j = blockIdx.y * blockDim.x + threadIdx.x;
++    if (j >= m) return;
++    float * row = x + (size_t) blockIdx.x * ldx;
++    float col[128];
++    for (int i = 0; i < p; ++i) col[i] = row[(size_t) i * m + j];
++    for (int a = 0; a < p; ++a) {
++        float acc = 0.0f;
++        for (int i = 0; i < p; ++i) {
++            const int s = i == 0 ? (a == 0 ? 0 : 1) : (a == 0 ? -1 : chi[((a - i) % q + q) % q]);
++            const int e = (i == a ? 1 : 0) + s;
++            acc = e > 0 ? __fadd_rn(acc, col[i]) : __fsub_rn(acc, col[i]);
++        }
++        row[(size_t) a * m + j] = __fmul_rn(acc, scale);
++    }
++}
++
++// The same, tiled: a block owns 64 columns of all P chunks (in LDS), its 4 waves split the P outputs, and every
++// output keeps the sum order above (i ascending), so the bits match. P is a template parameter so the sign table
++// and the loop bounds are constants. grid (M, m / 64), 256 threads; m a multiple of 64.
++template <int P>
++static __global__ void __launch_bounds__(256) rq_paley_tile_kernel(float * __restrict__ x, int ldx, int m, float scale) {
++    static_assert(P % 4 == 0, "P outputs split over 4 waves");
++    constexpr int Q = P - 1, A = P / 4;
++    __shared__ float  tile[P][64];
++    __shared__ int8_t sgn[P][P];
++    __shared__ int8_t chi[P];
++    for (int i = threadIdx.x; i < Q; i += blockDim.x) chi[i] = i == 0 ? 0 : -1;
++    __syncthreads();
++    if (threadIdx.x == 0) for (int i = 1; i < Q; ++i) chi[(i * i) % Q] = 1;
++    __syncthreads();
++    for (int t = threadIdx.x; t < P * P; t += blockDim.x) {
++        const int a = t / P, i = t % P;
++        const int s = i == 0 ? (a == 0 ? 0 : 1) : (a == 0 ? -1 : chi[((a - i) % Q + Q) % Q]);
++        sgn[a][i] = (int8_t) ((i == a ? 1 : 0) + s);
++    }
++    float * row = x + (size_t) blockIdx.x * ldx;
++    const int j0 = blockIdx.y * 64;
++    for (int t = threadIdx.x; t < P * 64; t += blockDim.x) {
++        tile[t / 64][t % 64] = row[(size_t) (t / 64) * m + j0 + t % 64];
++    }
++    __syncthreads();
++    const int jl = threadIdx.x % 64, a0 = (threadIdx.x / 64) * A;
++    for (int aa = 0; aa < A; ++aa) {
++        const int a = a0 + aa;
++        float acc = 0.0f;
++#pragma unroll 4
++        for (int i = 0; i < P; ++i) acc = sgn[a][i] > 0 ? __fadd_rn(acc, tile[i][jl]) : __fsub_rn(acc, tile[i][jl]);
++        row[(size_t) a * m + j0 + jl] = __fmul_rn(acc, scale);
++    }
++}
++
++// The same, one output per thread: a block holds 8 columns of all P chunks in LDS and its P*8 threads each sum one
++// output over i ascending, so the bits match. grid (M, m / 8), P * 8 threads; m a multiple of 8.
++template <int P>
++static __global__ void __launch_bounds__(P * 8) rq_paley_wide_kernel(float * __restrict__ x, int ldx, int m, float scale) {
++    constexpr int Q = P - 1;
++    __shared__ float  tile[P][8];
++    __shared__ int8_t chi[P];
++    for (int i = threadIdx.x; i < Q; i += blockDim.x) chi[i] = i == 0 ? 0 : -1;
++    __syncthreads();
++    if (threadIdx.x == 0) for (int i = 1; i < Q; ++i) chi[(i * i) % Q] = 1;
++    float * row = x + (size_t) blockIdx.x * ldx;
++    const int j0 = blockIdx.y * 8;
++    tile[threadIdx.x / 8][threadIdx.x % 8] = row[(size_t) (threadIdx.x / 8) * m + j0 + threadIdx.x % 8];
++    __syncthreads();
++    const int a = threadIdx.x / 8, jl = threadIdx.x % 8;
++    float acc = 0.0f;
++    for (int i = 0; i < P; ++i) {
++        const int s = i == 0 ? (a == 0 ? 0 : 1) : (a == 0 ? -1 : chi[((a - i) % Q + Q) % Q]);
++        const int e = (i == a ? 1 : 0) + s;
++        acc = e > 0 ? __fadd_rn(acc, tile[i][jl]) : __fsub_rn(acc, tile[i][jl]);
++    }
++    row[(size_t) a * m + j0 + jl] = __fmul_rn(acc, scale);
++}
++
++static __device__ __forceinline__ float rq_warp_min(float x) {
++#pragma unroll
++    for (int o = WARP_SIZE / 2; o > 0; o >>= 1) x = fminf(x, __shfl_xor_sync(0xffffffff, x, o, WARP_SIZE));
++    return x;
++}
++
++// ---------------------------------------------------------------------------- activation quantization
++// one block per token; aq packed codes (q - 8): token-major [M, K/8] (KA = 0) or the skinny kernel's
++// step-major rq_act_index layout for Tp tokens (KA > 0); s_a [M], z [M]
++static constexpr int RQ_QUANT_THREADS = 256;
++
++static __global__ void __launch_bounds__(RQ_QUANT_THREADS)
++rq_quantize_act_kernel(const float * __restrict__ x, int ldx, int K, float clip, int search, int32_t * __restrict__ aq,
++                       float * __restrict__ s_a, int32_t * __restrict__ z_out, int Tp, int KA,
++                       int32_t * __restrict__ zero, int64_t n_zero, int M) {
++    const int m = blockIdx.x;
++    if (m >= M) { // the blocks past the tokens clear the skinny kernel's split-K sums and counters, 16 ints per thread
++        const int64_t i0 = ((int64_t) (m - M) * RQ_QUANT_THREADS + threadIdx.x) * 16;
++#pragma unroll
++        for (int i = 0; i < 16; ++i) if (i0 + i < n_zero) zero[i0 + i] = 0;
++        return;
++    }
++    const int W = K >> 3;
++    const float4 * xr = reinterpret_cast<const float4 *>(x + (size_t) m * ldx);
++    float mn = 0.f, mx = 0.f; // min(x, 0), max(x, 0)
++    for (int i = threadIdx.x; i < K / 4; i += RQ_QUANT_THREADS) {
++        const float4 v = xr[i];
++        mn = fminf(mn, fminf(fminf(v.x, v.y), fminf(v.z, v.w)));
++        mx = fmaxf(mx, fmaxf(fmaxf(v.x, v.y), fmaxf(v.z, v.w)));
++    }
++    mn = rq_warp_min(mn);
++    mx = warp_reduce_max(mx);
++    __shared__ float smn[RQ_QUANT_THREADS / WARP_SIZE], smx[RQ_QUANT_THREADS / WARP_SIZE];
++    __shared__ float sh_inv, sh_z;
++    const int lane = threadIdx.x % WARP_SIZE, wid = threadIdx.x / WARP_SIZE;
++    if (lane == 0) { smn[wid] = mn; smx[wid] = mx; }
++    __syncthreads();
++    // experiment (RQ_ACT_SEARCH, CUDA only for now): per-token clip in 1.0 .. 0.6 with the least squared error
++    if (search) {
++        constexpr int NC = 9;
++        __shared__ float c_inv[NC], c_scale[NC], c_z[NC], c_err[NC][RQ_QUANT_THREADS / WARP_SIZE];
++        if (threadIdx.x == 0) {
++            float a = smn[0], b = smx[0];
++            for (int i = 1; i < RQ_QUANT_THREADS / WARP_SIZE; ++i) { a = fminf(a, smn[i]); b = fmaxf(b, smx[i]); }
++            for (int c = 0; c < NC; ++c) {
++                float l = a * (1.0f - 0.05f * c), h = b * (1.0f - 0.05f * c);
++                if (l == 0.f && h == 0.f) { l = -1.f; h = 1.f; }
++                c_scale[c] = (h - l) / 15.f;
++                c_inv[c]   = 1.f / c_scale[c];
++                c_z[c]     = fminf(fmaxf(rintf(-l * c_inv[c]), 0.f), 15.f);
++            }
++        }
++        __syncthreads();
++        float err[NC] = {};
++        for (int i = threadIdx.x; i < K; i += RQ_QUANT_THREADS) {
++            const float v = x[(size_t) m * ldx + i];
++#pragma unroll
++            for (int c = 0; c < NC; ++c) {
++                const float q = fminf(fmaxf(rintf(v * c_inv[c]) + c_z[c], 0.f), 15.f);
++                const float e = (q - c_z[c]) * c_scale[c] - v;
++                err[c] += e * e;
++            }
++        }
++#pragma unroll
++        for (int c = 0; c < NC; ++c) {
++            const float e = warp_reduce_sum(err[c]);
++            if (lane == 0) c_err[c][wid] = e;
++        }
++        __syncthreads();
++        if (threadIdx.x == 0) {
++            int best = 0;
++            float best_e = INFINITY;
++            for (int c = 0; c < NC; ++c) {
++                float e = 0.f;
++                for (int w = 0; w < RQ_QUANT_THREADS / WARP_SIZE; ++w) e += c_err[c][w];
++                if (e < best_e) { best_e = e; best = c; }
++            }
++            s_a[m] = c_scale[best]; z_out[m] = (int) c_z[best]; sh_inv = c_inv[best]; sh_z = c_z[best];
++        }
++    } else if (threadIdx.x == 0) {
++        for (int i = 1; i < RQ_QUANT_THREADS / WARP_SIZE; ++i) { mn = fminf(mn, smn[i]); mx = fmaxf(mx, smx[i]); }
++        mn = __fmul_rn(mn, clip);
++        mx = __fmul_rn(mx, clip);
++        if (mn == 0.f && mx == 0.f) { mn = -1.f; mx = 1.f; }
++        const float scale = __fdiv_rn(__fsub_rn(mx, mn), 15.f);
++        const float inv   = __fdiv_rn(1.f, scale);
++        const float zf    = fminf(fmaxf(rintf(__fmul_rn(-mn, inv)), 0.f), 15.f);
++        s_a[m]   = scale;
++        z_out[m] = (int) zf;
++        sh_inv   = inv;
++        sh_z     = zf;
++    }
++    __syncthreads();
++    const float inv = sh_inv, zf = sh_z;
++    for (int w = threadIdx.x; w < W; w += RQ_QUANT_THREADS) {
++        const float4 v0 = xr[2*w], v1 = xr[2*w + 1];
++        const float f[8] = { v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w };
++        uint32_t word = 0;
++#pragma unroll
++        for (int j = 0; j < 8; ++j) {
++            const float qf = fminf(fmaxf(__fadd_rn(rintf(__fmul_rn(f[j], inv)), zf), 0.f), 15.f);
++            word |= (uint32_t) (((int) qf - 8) & 0xF) << (4 * j);
++        }
++        aq[KA ? rq_act_index(m, w, Tp, KA) : (size_t) m * W + w] = (int32_t) word;
++    }
++}
++
++// ---------------------------------------------------------------------------- GEMM
++// dst[M, N] = epilogue(aq[M, K] . W[N, K]^T). Tile 128x128, K tile 128 (64 B per row), 8 warps as 2 (M) x 4 (N),
++// warp tile 64x32 = 4 m16 x 4 n8, 3-stage cp.async pipeline. Shared rows are 4 x 16 B chunks; chunk c of row r
++// is stored at c ^ ((r >> 1) & 3), so ldmatrix and cp.async are bank-conflict free.
++// W rows are K/256 blocks of [16 B header | 128 B codes]: K tile kt of row n is at n*row_bytes + (kt/2)*144 + 16 + (kt%2)*64.
++namespace rq {
++static constexpr int BM = 128, BN = 128, BK = 128;
++static constexpr int ROW_BYTES = BK / 2;
++static constexpr int STAGES = 3;
++static constexpr int GEMM_THREADS = 256;
++static constexpr int TILE_BYTES = BM * ROW_BYTES;
++static constexpr int STAGE_BYTES = 2 * TILE_BYTES;
++static constexpr int SMEM_BYTES = STAGES * STAGE_BYTES; // 48 KiB
++
++static __device__ __forceinline__ int swz(int row, int chunk) {
++    return row * ROW_BYTES + ((chunk ^ ((row >> 1) & 3)) << 4);
++}
++
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
++static __device__ __forceinline__ uint32_t smem_u32(const void * p) {
++    return static_cast<uint32_t>(__cvta_generic_to_shared(p));
++}
++
++static __device__ __forceinline__ void cp_async16_zfill(uint32_t dst, const void * src, bool valid) {
++#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" :: "r"(dst), "l"(src), "r"(valid ? 16 : 0));
++#else
++    GGML_UNUSED(dst); GGML_UNUSED(src); GGML_UNUSED(valid); NO_DEVICE_CODE;
++#endif
++}
++
++static __device__ __forceinline__ void cp_async_commit() {
++#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++    asm volatile("cp.async.commit_group;\n" ::);
++#endif
++}
++
++template <int N> static __device__ __forceinline__ void cp_async_wait() {
++#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
++#endif
++}
++
++static __device__ __forceinline__ void ldsm_x4(uint32_t (&r)[4], uint32_t addr) {
++#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
++#else
++    GGML_UNUSED(r); GGML_UNUSED(addr); NO_DEVICE_CODE;
++#endif
++}
++
++static __device__ __forceinline__ void mma_s4_k64(int (&c)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
++#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++    asm volatile("mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
++                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
++                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
++#else
++    GGML_UNUSED(c); GGML_UNUSED(a); GGML_UNUSED(b); NO_DEVICE_CODE;
++#endif
++}
++
++static __device__ __forceinline__ void load_stage(uint8_t * stage, const int32_t * __restrict__ A, const uint8_t * __restrict__ B,
++                                                  int M, int N, int Kw, size_t row_bytes, int m0, int n0, int kt) {
++    const uint32_t sA = smem_u32(stage);
++    const uint32_t sB = smem_u32(stage + TILE_BYTES);
++    const size_t b_off = (size_t) (kt >> 1) * sizeof(block_w4a4) + 16 + (kt & 1) * ROW_BYTES;
++#pragma unroll
++    for (int it = 0; it < 2; ++it) {
++        const int c = threadIdx.x + it * GEMM_THREADS;
++        const int row = c >> 2, chunk = c & 3;
++        const int gm = m0 + row, gn = n0 + row;
++        const bool va = gm < M, vb = gn < N;
++        const int32_t * srcA = A + (size_t) (va ? gm : 0) * Kw + kt * (BK / 8) + chunk * 4;
++        const uint8_t * srcB = B + (size_t) (vb ? gn : 0) * row_bytes + b_off + chunk * 16;
++        cp_async16_zfill(sA + swz(row, chunk), srcA, va);
++        cp_async16_zfill(sB + swz(row, chunk), srcB, vb);
++    }
++}
++
++static __global__ void __launch_bounds__(GEMM_THREADS, 2)
++gemm_kernel(const int32_t * __restrict__ A, const uint8_t * __restrict__ B, const float * __restrict__ s_a,
++            const int32_t * __restrict__ z, float * __restrict__ D, int ldd, int M, int N, int K) {
++    extern __shared__ __align__(128) uint8_t smem[];
++    const int Kw = K >> 3;
++    const int KT = K / BK;
++    const size_t row_bytes = (size_t) (K / QK_W4A4) * sizeof(block_w4a4);
++    const int m0 = blockIdx.y * BM, n0 = blockIdx.x * BN;
++    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
++    const int wm = warp & 1, wn = warp >> 1;
++
++    int acc[4][4][4];
++#pragma unroll
++    for (int i = 0; i < 4; ++i)
++#pragma unroll
++        for (int j = 0; j < 4; ++j)
++#pragma unroll
++            for (int r = 0; r < 4; ++r) acc[i][j][r] = 0;
++
++#pragma unroll
++    for (int s = 0; s < STAGES - 1; ++s) {
++        if (s < KT) load_stage(smem + s * STAGE_BYTES, A, B, M, N, Kw, row_bytes, m0, n0, s);
++        cp_async_commit();
++    }
++    for (int kt = 0; kt < KT; ++kt) {
++        cp_async_wait<STAGES - 2>();
++        __syncthreads();
++        {
++            const int nk = kt + STAGES - 1;
++            if (nk < KT) load_stage(smem + (nk % STAGES) * STAGE_BYTES, A, B, M, N, Kw, row_bytes, m0, n0, nk);
++            cp_async_commit();
++        }
++        const uint8_t * stage = smem + (kt % STAGES) * STAGE_BYTES;
++        const uint32_t sA = smem_u32(stage);
++        const uint32_t sB = smem_u32(stage + TILE_BYTES);
++#pragma unroll
++        for (int ks = 0; ks < BK / 64; ++ks) {
++            uint32_t af[4][4], bf[4][2];
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                const int row = wm * 64 + i * 16 + (lane & 15);
++                ldsm_x4(af[i], sA + swz(row, 2 * ks + (lane >> 4)));
++            }
++#pragma unroll
++            for (int p = 0; p < 2; ++p) {
++                const int j = lane >> 3;
++                const int row = wn * 32 + p * 16 + ((j >> 1) << 3) + (lane & 7);
++                uint32_t r[4];
++                ldsm_x4(r, sB + swz(row, 2 * ks + (j & 1)));
++                bf[2 * p][0] = r[0]; bf[2 * p][1] = r[1];
++                bf[2 * p + 1][0] = r[2]; bf[2 * p + 1][1] = r[3];
++            }
++#pragma unroll
++            for (int i = 0; i < 4; ++i)
++#pragma unroll
++                for (int j = 0; j < 4; ++j) mma_s4_k64(acc[i][j], af[i], bf[j]);
++        }
++    }
++    cp_async_wait<0>();
++
++    // epilogue: corr = acc + (8 - z[m]) * colsum[n]; y = (fp32(corr) * s_a[m]) * s_w[n]; s_w, colsum from row n's header
++    const int g = lane >> 2, t = lane & 3;
++#pragma unroll
++    for (int i = 0; i < 4; ++i) {
++#pragma unroll
++        for (int h = 0; h < 2; ++h) {
++            const int m = m0 + wm * 64 + i * 16 + g + 8 * h;
++            if (m >= M) continue;
++            const int zc = 8 - z[m];
++            const float sa = s_a[m];
++#pragma unroll
++            for (int j = 0; j < 4; ++j) {
++#pragma unroll
++                for (int e = 0; e < 2; ++e) {
++                    const int n = n0 + wn * 32 + j * 8 + 2 * t + e;
++                    if (n >= N) continue;
++                    const block_w4a4 * hdr = reinterpret_cast<const block_w4a4 *>(B + (size_t) n * row_bytes);
++                    const int c = acc[i][j][2 * h + e] + zc * hdr->sum;
++                    D[(size_t) m * ldd + n] = __fmul_rn(__fmul_rn(__int2float_rn(c), sa), hdr->d);
++                }
++            }
++        }
++    }
++}
++#endif // !GGML_USE_HIP && !GGML_USE_MUSA
++} // namespace rq
++
++// ---------------------------------------------------------------------------- skinny path (gfx906; CUDA with RQ_SKINNY=1)
++// The weight is repacked in place on first use: [Wt codes, N*K/2 bytes | s_w, N floats | colsum, N int32], which
++// fits in the N*K/256 blocks of 144 B. On that first use tensor->extra (unused for non-split buffers) gets the
++// tensor's state: whether it is repacked, and its activation clip from the block headers.
++struct rq_tensor_info {
++    bool  repacked;
++    float clip; // block 0 header pad[1]; 0 = unset
++};
++
++static __global__ void rq_repack_kernel(const uint8_t * __restrict__ src, int32_t * __restrict__ wt, float * __restrict__ sw,
++                                        int32_t * __restrict__ colsum, int N, int K) {
++    const int Kw = K / 8;
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= (int64_t) N * Kw) return;
++    const int c = (int) (i / Kw), kw = (int) (i % Kw);
++    const uint8_t * row = src + (size_t) c * (K / QK_W4A4) * sizeof(block_w4a4);
++    wt[rq_wt_index(c, kw, Kw)] = *reinterpret_cast<const int32_t *>(row + (kw / 32) * sizeof(block_w4a4) + 16 + (kw % 32) * 4);
++    if (kw == 0) {
++        const block_w4a4 * h = reinterpret_cast<const block_w4a4 *>(row);
++        sw[c]     = h->d;
++        colsum[c] = h->sum;
++    }
++}
++
++static int rq_skinny_tp(int64_t m) {
++    for (int p : {1, 2, 4, 8, 16, 24, 32, 48}) if (m <= p) return p;
++    return 64;
++}
++
++// launch shape of the skinny kernel for Tp tokens: R channel groups per wave, W waves, G split-K workgroups
++struct rq_skinny_shape {
++    int R, KA, W, G, kw_split, groups;
++};
++
++static rq_skinny_shape rq_skinny_plan(int tp, int N, int Kw) {
++    int R0 = 1, KA = 1;
++    switch (tp) {
++        case 1:  R0 = rq_cfg<1>::R;  KA = rq_cfg<1>::KA;  break;
++        case 2:  R0 = rq_cfg<2>::R;  KA = rq_cfg<2>::KA;  break;
++        case 4:  R0 = rq_cfg<4>::R;  KA = rq_cfg<4>::KA;  break;
++        case 8:  R0 = rq_cfg<8>::R;  KA = rq_cfg<8>::KA;  break;
++        case 16: R0 = rq_cfg<16>::R; KA = rq_cfg<16>::KA; break;
++        case 24: R0 = rq_cfg<24>::R; KA = rq_cfg<24>::KA; break;
++        case 32: R0 = rq_cfg<32>::R; KA = rq_cfg<32>::KA; break;
++        case 48: R0 = rq_cfg<48>::R; KA = rq_cfg<48>::KA; break;
++        default: R0 = rq_cfg<64>::R; KA = rq_cfg<64>::KA; break;
++    }
++    const int g64 = N / RQ_WAVE;
++    const int R = R0 >= 4 && g64 % 4 == 0 ? 4 : R0 >= 2 && g64 % 2 == 0 ? 2 : 1;
++    const int groups = g64 / R;
++    const int steps = Kw / RQ_KW;
++    static const int env_w = getenv("RQ_SKINNY_W") ? atoi(getenv("RQ_SKINNY_W")) : 0;
++    static const int env_g = getenv("RQ_SKINNY_G") ? atoi(getenv("RQ_SKINNY_G")) : 0;
++    // MI50 sweep (rig/results/skinny-sweep-t8.txt): 8 waves with a 4-way split-K is within noise of the best launch for
++    // every 27B shape at the verify widths, a 2-way split at T <= 2
++    const int W = env_w > 0 ? std::min(env_w, 8) : 8;
++    int G = env_g > 0 ? env_g : tp <= 2 ? 2 : 4;
++    G = std::max(1, std::min(G, steps / W));
++    const int steps_per_wg = (steps + G - 1) / G;
++    G = (steps + steps_per_wg - 1) / steps_per_wg;
++    return { R, KA, W, G, steps_per_wg * RQ_KW, groups };
++}
++
++template <int T, int R>
++static void rq_skinny_launch(const rq_skinny_shape & sh, const int32_t * ac, const int32_t * wt, int32_t * acc, int N, int Kw,
++                             const rq_epi & epi, cudaStream_t stream) {
++    rq_skinny_kernel<T, R><<<dim3(sh.groups, sh.G), RQ_WAVE * sh.W, rq_lds_bytes<T, R>(sh.W), stream>>>(ac, wt, acc, N, Kw, sh.kw_split, epi);
++}
++
++template <int T>
++static void rq_skinny_launch_r(const rq_skinny_shape & sh, const int32_t * ac, const int32_t * wt, int32_t * acc, int N, int Kw,
++                               const rq_epi & epi, cudaStream_t stream) {
++    constexpr int R0 = rq_cfg<T>::R;
++    if (sh.R == 4)      rq_skinny_launch<T, R0 >= 4 ? 4 : 1>(sh, ac, wt, acc, N, Kw, epi, stream);
++    else if (sh.R == 2) rq_skinny_launch<T, R0 >= 2 ? 2 : 1>(sh, ac, wt, acc, N, Kw, epi, stream);
++    else                rq_skinny_launch<T, 1>(sh, ac, wt, acc, N, Kw, epi, stream);
++}
++
++static void rq_skinny_dispatch(int tp, const rq_skinny_shape & sh, const int32_t * ac, const int32_t * wt, int32_t * acc, int N,
++                               int Kw, const rq_epi & epi, cudaStream_t stream) {
++    switch (tp) {
++        case 1:  rq_skinny_launch_r<1>(sh, ac, wt, acc, N, Kw, epi, stream);  break;
++        case 2:  rq_skinny_launch_r<2>(sh, ac, wt, acc, N, Kw, epi, stream);  break;
++        case 4:  rq_skinny_launch_r<4>(sh, ac, wt, acc, N, Kw, epi, stream);  break;
++        case 8:  rq_skinny_launch_r<8>(sh, ac, wt, acc, N, Kw, epi, stream);  break;
++        case 16: rq_skinny_launch_r<16>(sh, ac, wt, acc, N, Kw, epi, stream); break;
++        case 24: rq_skinny_launch_r<24>(sh, ac, wt, acc, N, Kw, epi, stream); break;
++        case 32: rq_skinny_launch_r<32>(sh, ac, wt, acc, N, Kw, epi, stream); break;
++        case 48: rq_skinny_launch_r<48>(sh, ac, wt, acc, N, Kw, epi, stream); break;
++        default: rq_skinny_launch_r<64>(sh, ac, wt, acc, N, Kw, epi, stream); break;
++    }
++}
++
++static bool rq_use_skinny(const ggml_tensor * src0) {
++#if defined(GGML_USE_HIP)
++    GGML_UNUSED(src0);
++    return true;
++#else
++    static const bool env = getenv("RQ_SKINNY") && atoi(getenv("RQ_SKINNY"));
++    return env && src0->ne[1] % RQ_WAVE == 0;
++#endif
++}
++
++bool ggml_cuda_rq_w4a4_ready(const ggml_tensor * src0) {
++    return src0->extra != nullptr;
++}
++
++// ---------------------------------------------------------------------------- dispatch
++bool ggml_cuda_rq_w4a4_supported(int cc, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst) {
++    int p, m;
++    const bool shapes = (src0->type == GGML_TYPE_W4A4 || src0->type == GGML_TYPE_W4A4H) &&
++           src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
++           src0->ne[0] % QK_W4A4 == 0 && src0->ne[2] == 1 && src0->ne[3] == 1 &&
++           src1->ne[2] == 1 && src1->ne[3] == 1 && ggml_is_contiguous(src0) &&
++           src1->nb[0] == sizeof(float) && src1->nb[1] % 16 == 0 && dst->nb[0] == sizeof(float) &&
++           (src0->type != GGML_TYPE_W4A4H || (rq_factor(src0->ne[0], p, m) && m <= 12288)); // FWHT chunk fits in 48 KiB
++#if defined(GGML_USE_MUSA)
++    GGML_UNUSED(cc); GGML_UNUSED(shapes);
++    return false;
++#elif defined(GGML_USE_HIP)
++    return GGML_CUDA_CC_IS_AMD(cc) && shapes && src0->ne[1] % RQ_WAVE == 0;
++#else
++    return GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_AMPERE && shapes;
++#endif
++}
++
++void ggml_cuda_mul_mat_rq_w4a4(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
++#if defined(GGML_USE_MUSA)
++    GGML_UNUSED(ctx); GGML_UNUSED(src0); GGML_UNUSED(src1); GGML_UNUSED(dst);
++    GGML_ABORT("ruquant W4A4 is not available on this backend");
++#else
++    const int64_t K = src0->ne[0], N = src0->ne[1], M = src1->ne[1];
++    cudaStream_t stream = ctx.stream();
++
++    const float * x = (const float *) src1->data;
++    int ldx = (int) (src1->nb[1] / sizeof(float));
++    ggml_cuda_pool_alloc<float> xh(ctx.pool());
++    if (src0->type == GGML_TYPE_W4A4H) {
++        int p, m;
++        GGML_ASSERT(rq_factor(K, p, m));
++        xh.alloc(M * K);
++        const float scale = 1.0f / sqrtf((float) K); // same constant as the CPU reference
++        const int tf = std::min(m / 2, 512);
++        rq_fwht_kernel<<<dim3(M, p), std::max(tf, 32), m * sizeof(float), stream>>>(x, ldx, xh.get(), (int) K, m, p, scale);
++        if (p > 1) {
++            const dim3 tiles(M, m / 64);
++            static const bool tile = getenv("RQ_PALEY_TILE") && atoi(getenv("RQ_PALEY_TILE"));
++            const dim3 cols8(M, m / 8);
++            switch (m % 64 == 0 ? p : 0) {
++                case 12: tile ? rq_paley_tile_kernel<12><<<tiles, 256, 0, stream>>>(xh.get(), (int) K, m, scale)
++                              : rq_paley_wide_kernel<12><<<cols8, 12 * 8, 0, stream>>>(xh.get(), (int) K, m, scale); break;
++                case 20: tile ? rq_paley_tile_kernel<20><<<tiles, 256, 0, stream>>>(xh.get(), (int) K, m, scale)
++                              : rq_paley_wide_kernel<20><<<cols8, 20 * 8, 0, stream>>>(xh.get(), (int) K, m, scale); break;
++                case 68: tile ? rq_paley_tile_kernel<68><<<tiles, 256, 0, stream>>>(xh.get(), (int) K, m, scale)
++                              : rq_paley_wide_kernel<68><<<cols8, 68 * 8, 0, stream>>>(xh.get(), (int) K, m, scale); break;
++                default: rq_paley_kernel<<<dim3(M, (m + 127) / 128), 128, 0, stream>>>(xh.get(), (int) K, m, p, scale); break;
++            }
++        }
++        x = xh.get();
++        ldx = (int) K;
++    }
++    static const int search = getenv("RQ_ACT_SEARCH") ? atoi(getenv("RQ_ACT_SEARCH")) : 0;
++    rq_tensor_info * info = (rq_tensor_info *) src0->extra;
++    if (info == nullptr) { // first use (never inside a graph capture, see ggml_cuda_rq_w4a4_ready): read the tensor's clip
++        float tclip = 0.0f;
++        CUDA_CHECK(cudaMemcpyAsync(&tclip, (const char *) src0->data + offsetof(block_w4a4, pad) + sizeof(int32_t), sizeof(float),
++                                   cudaMemcpyDeviceToHost, stream));
++        CUDA_CHECK(cudaStreamSynchronize(stream));
++        info = new rq_tensor_info{ false, tclip };
++        const_cast<ggml_tensor *>(src0)->extra = info;
++    }
++    const float clip = ggml_rq_act_clip_for(info->clip, src0->type == GGML_TYPE_W4A4H);
++
++    if (rq_use_skinny(src0)) {
++        const int Kw = (int) (K / 8);
++        uint8_t * base = (uint8_t *) src0->data;
++        if (!info->repacked) {
++            const size_t nbytes = ggml_nbytes(src0);
++            ggml_cuda_pool_alloc<uint8_t> tmp(ctx.pool(), nbytes);
++            CUDA_CHECK(cudaMemcpyAsync(tmp.get(), base, nbytes, cudaMemcpyDeviceToDevice, stream));
++            const int64_t n_threads = N * Kw;
++            rq_repack_kernel<<<(n_threads + 255) / 256, 256, 0, stream>>>(tmp.get(), (int32_t *) base, (float *) (base + N * K / 2),
++                                                                        (int32_t *) (base + N * K / 2 + N * 4), (int) N, (int) K);
++            CUDA_CHECK(cudaGetLastError());
++            info->repacked = true;
++        }
++        const int32_t * wt     = (const int32_t *) base;
++        const float   * sw     = (const float *) (base + N * K / 2);
++        const int32_t * colsum = (const int32_t *) (base + N * K / 2 + N * 4);
++        const int tp_max = rq_skinny_tp(M);
++        const int ldd = (int) (dst->nb[1] / sizeof(float));
++        ggml_cuda_pool_alloc<int32_t> aq(ctx.pool(), (size_t) tp_max * Kw);
++        ggml_cuda_pool_alloc<float>   sa(ctx.pool(), tp_max);
++        ggml_cuda_pool_alloc<int32_t> za(ctx.pool(), tp_max);
++        ggml_cuda_pool_alloc<int32_t> acc(ctx.pool(), (size_t) tp_max * N + N / RQ_WAVE); // split-K sums, then counters
++        for (int64_t m0 = 0; m0 < M; m0 += 64) {
++            const int mc = (int) std::min<int64_t>(64, M - m0);
++            const int tp = rq_skinny_tp(mc);
++            const rq_skinny_shape sh = rq_skinny_plan(tp, (int) N, Kw);
++            int32_t * cnt = acc.get() + (size_t) mc * N;
++            const int64_t n_zero = sh.G > 1 ? (int64_t) mc * N + sh.groups : 0;
++            const int zero_blocks = (int) ((n_zero + RQ_QUANT_THREADS * 16 - 1) / (RQ_QUANT_THREADS * 16));
++            rq_quantize_act_kernel<<<mc + zero_blocks, RQ_QUANT_THREADS, 0, stream>>>(x + m0 * ldx, ldx, (int) K, clip, search,
++                                                                       aq.get(), sa.get(), za.get(), tp, sh.KA, acc.get(), n_zero, mc);
++            const rq_epi epi = { sa.get(), za.get(), sw, colsum, (float *) dst->data + m0 * ldd, ldd, mc, cnt };
++            rq_skinny_dispatch(tp, sh, aq.get(), wt, acc.get(), (int) N, Kw, epi, stream);
++        }
++        CUDA_CHECK(cudaGetLastError());
++        return;
++    }
++
++#if defined(GGML_USE_HIP)
++    GGML_ABORT("ruquant W4A4: no HIP path for this shape");
++#else
++    ggml_cuda_pool_alloc<int32_t> aq(ctx.pool(), M * K / 8);
++    ggml_cuda_pool_alloc<float>   sa(ctx.pool(), M);
++    ggml_cuda_pool_alloc<int32_t> za(ctx.pool(), M);
++    rq_quantize_act_kernel<<<M, RQ_QUANT_THREADS, 0, stream>>>(x, ldx, (int) K, clip, search, aq.get(), sa.get(), za.get(), 0, 0,
++                                                              nullptr, 0, (int) M);
++
++    const dim3 grid((N + rq::BN - 1) / rq::BN, (M + rq::BM - 1) / rq::BM);
++    rq::gemm_kernel<<<grid, rq::GEMM_THREADS, rq::SMEM_BYTES, stream>>>(
++        aq.get(), (const uint8_t *) src0->data, sa.get(), za.get(), (float *) dst->data,
++        (int) (dst->nb[1] / sizeof(float)), (int) M, (int) N, (int) K);
++    CUDA_CHECK(cudaGetLastError());
++#endif
++#endif
++}
+diff --git a/ggml/src/ggml-cuda/rq-w4a4.cuh b/ggml/src/ggml-cuda/rq-w4a4.cuh
+new file mode 100644
+index 0000000..7b0b9eb
+--- /dev/null
++++ b/ggml/src/ggml-cuda/rq-w4a4.cuh
+@@ -0,0 +1,8 @@
++#include "common.cuh"
++
++// ruquant W4A4 / W4A4H matmul: optional online Hadamard, per-token int4 activation quantization,
++// int4 x int4 GEMM with int32 accumulation, the spec epilogue. Same bits as the CPU reference.
++bool ggml_cuda_rq_w4a4_supported(int cc, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst);
++// false while the weight still needs its one-time in-place repack (skinny path), which must not be captured in a graph
++bool ggml_cuda_rq_w4a4_ready(const ggml_tensor * src0);
++void ggml_cuda_mul_mat_rq_w4a4(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/vendors/hip.h b/ggml/src/ggml-cuda/vendors/hip.h
+index d0d6492..ef3ddbc 100644
+--- a/ggml/src/ggml-cuda/vendors/hip.h
++++ b/ggml/src/ggml-cuda/vendors/hip.h
+@@ -123,7 +123,15 @@
+ #define cudaStreamNonBlocking hipStreamNonBlocking
+ #define cudaStreamPerThread hipStreamPerThread
+ #define cudaStreamSynchronize hipStreamSynchronize
++#if HIP_VERSION < 60100000
++// ruquant: ROCm 5.x has no default for the flags argument
++static inline hipError_t ggml_hip_stream_wait_event(hipStream_t stream, hipEvent_t event, unsigned int flags = 0) {
++    return hipStreamWaitEvent(stream, event, flags);
++}
++#define cudaStreamWaitEvent ggml_hip_stream_wait_event
++#else
+ #define cudaStreamWaitEvent hipStreamWaitEvent
++#endif
+ #define cudaGraphExec_t hipGraphExec_t
+ #define cudaGraphNode_t hipGraphNode_t
+ #define cudaKernelNodeParams hipKernelNodeParams
+diff --git a/ggml/src/ggml-hip/CMakeLists.txt b/ggml/src/ggml-hip/CMakeLists.txt
+index 6a7d235..2ca1c38 100644
+--- a/ggml/src/ggml-hip/CMakeLists.txt
++++ b/ggml/src/ggml-hip/CMakeLists.txt
+@@ -52,7 +52,10 @@ if (GGML_HIP_RCCL)
+ endif()
+ 
+ if (${hip_VERSION} VERSION_LESS 6.1)
+-    message(FATAL_ERROR "At least ROCM/HIP V6.1 is required")
++    # ruquant: builds on ROCm 5.7 (MI50 boxes). Its hip_bf16.h defines non-inline host functions, one copy per
++    # translation unit; they are identical, so the linker may keep any.
++    message(WARNING "ruquant: HIP older than 6.1, building anyway")
++    set(GGML_HIP_OLD_ROCM ON)
+ endif()
+ 
+ message(STATUS "HIP and hipBLAS found")
+@@ -142,3 +145,7 @@ if (GGML_HIP_RCCL)
+ endif()
+ 
+ target_link_libraries(ggml-hip PRIVATE ggml-base hip::host roc::rocblas roc::hipblas)
++
++if (GGML_HIP_OLD_ROCM)
++    target_link_options(ggml-hip PRIVATE -Wl,--allow-multiple-definition)
++endif()
+diff --git a/ggml/src/ggml-quants.c b/ggml/src/ggml-quants.c
+index 7750a72..af14789 100644
+--- a/ggml/src/ggml-quants.c
++++ b/ggml/src/ggml-quants.c
+@@ -5378,6 +5378,258 @@ static bool validate_e_e8m0(uint8_t e, size_t i) {
+         } \
+     }
+ 
++
++// ====================== ruquant W4A4 ======================
++
++static bool rq_is_prime(int q) {
++    if (q < 2) return false;
++    for (int d = 2; d * d <= q; ++d) if (q % d == 0) return false;
++    return true;
++}
++
++bool ggml_rq_hadamard_factor(int64_t n, int * p, int * m) {
++    for (int pp = 1; pp <= 128 && pp <= n; ++pp) {
++        if (pp > 1 && (pp % 4 != 0 || !rq_is_prime(pp - 1) || (pp - 1) % 4 != 3)) continue;
++        if (n % pp != 0) continue;
++        const int64_t mm = n / pp;
++        if (mm & (mm - 1)) continue;
++        *p = pp;
++        *m = (int) mm;
++        return true;
++    }
++    return false;
++}
++
++// Paley construction I: A = I + S, S[0][j>0] = 1, S[i>0][0] = -1, S[i][j] = chi(j - i mod q) for i, j >= 1
++static void rq_paley(int p, int8_t * A) {
++    const int q = p - 1;
++    int8_t chi[128];
++    chi[0] = 0;
++    for (int i = 1; i < q; ++i) chi[i] = -1;
++    for (int i = 1; i < q; ++i) chi[(i * i) % q] = 1;
++    for (int i = 0; i < p; ++i) {
++        for (int j = 0; j < p; ++j) {
++            int s;
++            if (i == 0)      s = j == 0 ? 0 : 1;
++            else if (j == 0) s = -1;
++            else             s = chi[((j - i) % q + q) % q];
++            A[i*p + j] = (int8_t) ((i == j ? 1 : 0) + s);
++        }
++    }
++}
++
++void ggml_rq_hadamard(float * GGML_RESTRICT x, int64_t n, bool transpose) {
++    int p, m;
++    GGML_ASSERT(ggml_rq_hadamard_factor(n, &p, &m) && "row length has no ruquant Hadamard");
++    // Sylvester (symmetric) over each chunk of m, butterflies in increasing stride
++    for (int i = 0; i < p; ++i) {
++        float * c = x + (int64_t) i * m;
++        for (int h = 1; h < m; h <<= 1) {
++            for (int j = 0; j < m; j += 2*h) {
++                for (int k = j; k < j + h; ++k) {
++                    const float a = c[k], b = c[k + h];
++                    c[k] = a + b;
++                    c[k + h] = a - b;
++                }
++            }
++        }
++    }
++    // Paley across chunks: y[a] = sum_i x[i] A[i][a] (A[a][i] when transposed), i ascending from 0
++    if (p > 1) {
++        int8_t A[128*128];
++        float col[128];
++        rq_paley(p, A);
++        for (int j = 0; j < m; ++j) {
++            for (int i = 0; i < p; ++i) col[i] = x[(int64_t) i*m + j];
++            for (int a = 0; a < p; ++a) {
++                float acc = 0.0f;
++                for (int i = 0; i < p; ++i) {
++                    const int8_t e = transpose ? A[a*p + i] : A[i*p + a];
++                    acc = e > 0 ? acc + col[i] : acc - col[i];
++                }
++                x[(int64_t) a*m + j] = acc;
++            }
++        }
++    }
++    const float scale = 1.0f / sqrtf((float) n);
++    for (int64_t i = 0; i < n; ++i) x[i] *= scale;
++}
++
++static inline void rq_pack(block_w4a4 * GGML_RESTRICT y, const int8_t * GGML_RESTRICT codes, int64_t k, float d, int32_t sum) {
++    for (int64_t b = 0; b < k / QK_W4A4; ++b) {
++        y[b].d = d;
++        y[b].sum = sum;
++        y[b].pad[0] = (int32_t) k;
++        y[b].pad[1] = 0;
++        for (int w = 0; w < QK_W4A4 / 8; ++w) {
++            uint32_t word = 0;
++            for (int j = 0; j < 8; ++j) word |= (uint32_t) (codes[b*QK_W4A4 + 8*w + j] & 0xF) << (4*j);
++            y[b].qs[w] = word;
++        }
++    }
++}
++
++static inline int32_t rq_code(uint32_t word, int j) {
++    return (int32_t) (((word >> (4*j)) & 0xF) << 28) >> 28;
++}
++
++// weights: symmetric codes in [-8, 7], scale = clip * amax / 7 with the clip ratio (1.0 down to 0.7 in
++// 13 steps) that minimizes the row's squared rounding error
++static void rq_quantize_row_w(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k) {
++    GGML_ASSERT(k % QK_W4A4 == 0);
++    float amax = 0.0f;
++    for (int64_t i = 0; i < k; ++i) amax = fmaxf(amax, fabsf(x[i]));
++    float best_s = 0.0f;
++    if (amax > 0.0f) {
++        double best_err = INFINITY;
++        for (int r = 0; r < 13; ++r) {
++            const float s = amax * (1.0f - 0.025f * r) / 7.0f;
++            double err = 0.0;
++            for (int64_t i = 0; i < k; ++i) {
++                const float q = fminf(fmaxf(rintf(x[i] / s), -8.0f), 7.0f);
++                const double e = (double) (q * s) - (double) x[i];
++                err += e * e;
++            }
++            if (err < best_err) { best_err = err; best_s = s; }
++        }
++    }
++    int8_t * codes = (int8_t *) malloc(k);
++    int32_t sum = 0;
++    for (int64_t i = 0; i < k; ++i) {
++        codes[i] = best_s > 0.0f ? (int8_t) fminf(fmaxf(rintf(x[i] / best_s), -8.0f), 7.0f) : 0;
++        sum += codes[i];
++    }
++    rq_pack(y, codes, k, best_s, sum);
++    free(codes);
++}
++
++// activation clip ratio: the range [min(x,0), max(x,0)] is scaled by it before quantizing (outliers
++// saturate). A weight tensor carries its own in its block headers (pad[1], a float; 0 = unset); RQ_ACT_CLIP /
++// RQ_ACT_CLIP_H (W4A4 / W4A4H inputs) override it for experiments; without either it is 1. Every backend
++// resolves it the same way.
++float ggml_rq_act_clip(bool hadamard) {
++    return ggml_rq_act_clip_for(0.0f, hadamard);
++}
++
++float ggml_rq_act_clip_for(float tensor_clip, bool hadamard) {
++    static float env[2] = { -2.0f, -2.0f }; // -1: not set
++    if (env[0] == -2.0f) {
++        const char * e = getenv("RQ_ACT_CLIP");
++        const char * eh = getenv("RQ_ACT_CLIP_H");
++        env[0] = e ? (float) atof(e) : -1.0f;
++        env[1] = eh ? (float) atof(eh) : env[0];
++    }
++    const float e = env[hadamard ? 1 : 0];
++    return e > 0.0f ? e : tensor_clip > 0.0f ? tensor_clip : 1.0f;
++}
++
++float ggml_rq_tensor_clip(const void * blocks) {
++    float c;
++    memcpy(&c, &((const block_w4a4 *) blocks)->pad[1], sizeof(c));
++    return c;
++}
++
++// activations, the spec's per-token asymmetric quantizer: range [min(x,0), max(x,0)] * clip, 15 steps
++static void rq_quantize_row_a(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k, float clip) {
++    GGML_ASSERT(k % QK_W4A4 == 0);
++    float mn = 0.0f, mx = 0.0f;
++    for (int64_t i = 0; i < k; ++i) { mn = fminf(mn, x[i]); mx = fmaxf(mx, x[i]); }
++    mn *= clip;
++    mx *= clip;
++    if (mn == 0.0f && mx == 0.0f) { mn = -1.0f; mx = 1.0f; }
++    const float scale = (mx - mn) / 15.0f;
++    const float inv = 1.0f / scale;
++    const float zf = fminf(fmaxf(rintf(-mn * inv), 0.0f), 15.0f);
++    int8_t * codes = (int8_t *) malloc(k);
++    for (int64_t i = 0; i < k; ++i) {
++        const float q = fminf(fmaxf(rintf(x[i] * inv) + zf, 0.0f), 15.0f);
++        codes[i] = (int8_t) ((int) q - 8);
++    }
++    rq_pack(y, codes, k, scale, (int32_t) zf);
++    free(codes);
++}
++
++void quantize_row_w4a4_ref(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k) {
++    rq_quantize_row_w(x, y, k);
++}
++
++void quantize_row_w4a4h_ref(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k) {
++    // stores Q(W H): the activations get x H at run time, and (x H)(W H)^T = x W^T
++    float * t = (float *) malloc(k * sizeof(float));
++    memcpy(t, x, k * sizeof(float));
++    ggml_rq_hadamard(t, k, false);
++    rq_quantize_row_w(t, y, k);
++    free(t);
++}
++
++void quantize_row_a4_ref(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k) {
++    rq_quantize_row_a(x, y, k, ggml_rq_act_clip(false));
++}
++
++void quantize_row_a4h_ref(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k) {
++    quantize_row_a4h_clip(x, y, k, ggml_rq_act_clip(true));
++}
++
++void quantize_row_a4_clip(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k, float clip) {
++    rq_quantize_row_a(x, y, k, clip);
++}
++
++void quantize_row_a4h_clip(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k, float clip) {
++    float * t = (float *) malloc(k * sizeof(float));
++    memcpy(t, x, k * sizeof(float));
++    ggml_rq_hadamard(t, k, false);
++    rq_quantize_row_a(t, y, k, clip);
++    free(t);
++}
++
++void dequantize_row_w4a4(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
++    for (int64_t b = 0; b < k / QK_W4A4; ++b)
++        for (int w = 0; w < QK_W4A4 / 8; ++w)
++            for (int j = 0; j < 8; ++j) y[b*QK_W4A4 + 8*w + j] = rq_code(x[b].qs[w], j) * x[b].d;
++}
++
++void dequantize_row_a4(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
++    for (int64_t b = 0; b < k / QK_W4A4; ++b)
++        for (int w = 0; w < QK_W4A4 / 8; ++w)
++            for (int j = 0; j < 8; ++j) y[b*QK_W4A4 + 8*w + j] = (rq_code(x[b].qs[w], j) + 8 - x[b].sum) * x[b].d;
++}
++
++// back to the original basis, one row (of length pad[0]) at a time
++static void rq_unrotate(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
++    for (int64_t off = 0; off < k; ) {
++        const int64_t n = x[off / QK_W4A4].pad[0];
++        GGML_ASSERT(n > 0 && off + n <= k);
++        ggml_rq_hadamard(y + off, n, true);
++        off += n;
++    }
++}
++
++void dequantize_row_w4a4h(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
++    dequantize_row_w4a4(x, y, k);
++    rq_unrotate(x, y, k);
++}
++
++void dequantize_row_a4h(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
++    dequantize_row_a4(x, y, k);
++    rq_unrotate(x, y, k);
++}
++
++size_t quantize_w4a4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
++    GGML_UNUSED(imatrix);
++    const size_t row_size = ggml_row_size(GGML_TYPE_W4A4, n_per_row);
++    for (int64_t r = 0; r < nrows; ++r)
++        quantize_row_w4a4_ref(src + r*n_per_row, (block_w4a4 *) ((char *) dst + r*row_size), n_per_row);
++    return nrows * row_size;
++}
++
++size_t quantize_w4a4h(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
++    GGML_UNUSED(imatrix);
++    const size_t row_size = ggml_row_size(GGML_TYPE_W4A4H, n_per_row);
++    for (int64_t r = 0; r < nrows; ++r)
++        quantize_row_w4a4h_ref(src + r*n_per_row, (block_w4a4 *) ((char *) dst + r*row_size), n_per_row);
++    return nrows * row_size;
++}
++
+ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbytes) {
+     if (type < 0 || type >= GGML_TYPE_COUNT) {
+         fprintf(stderr, "%s: invalid type %d\n", __func__, type);
+@@ -5525,6 +5777,19 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
+             {
+                 VALIDATE_ROW_DATA_DM_F16_IMPL(block_q5_1, data, nb, d, m);
+             } break;
++        case GGML_TYPE_W4A4:
++        case GGML_TYPE_W4A4H:
++        case GGML_TYPE_A4:
++        case GGML_TYPE_A4H:
++            {
++                const block_w4a4 * q = (const block_w4a4 *) data;
++                for (size_t i = 0; i < nb; ++i) {
++                    if (!isfinite(q[i].d)) {
++                        fprintf(stderr, "%s: invalid scale in block %zu\n", __func__, i);
++                        return false;
++                    }
++                }
++            } break;
+         case GGML_TYPE_Q8_0:
+             {
+                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q8_0, data, nb);
+diff --git a/ggml/src/ggml-quants.h b/ggml/src/ggml-quants.h
+index 75188f1..209b89f 100644
+--- a/ggml/src/ggml-quants.h
++++ b/ggml/src/ggml-quants.h
+@@ -21,6 +21,22 @@ GGML_API void quantize_row_q4_1_ref(const float * GGML_RESTRICT x, block_q4_1 *
+ GGML_API void quantize_row_q5_0_ref(const float * GGML_RESTRICT x, block_q5_0 * GGML_RESTRICT y, int64_t k);
+ GGML_API void quantize_row_q5_1_ref(const float * GGML_RESTRICT x, block_q5_1 * GGML_RESTRICT y, int64_t k);
+ GGML_API void quantize_row_q8_0_ref(const float * GGML_RESTRICT x, block_q8_0 * GGML_RESTRICT y, int64_t k);
++
++// ruquant W4A4 (see block_w4a4 in ggml-common.h). The quantizers take one whole row (k = K).
++// ggml_rq_hadamard: x <- x H, H = (H_p kron H_m) / sqrt(n), n = p * m, m a power of 2, H_p a Paley
++// Hadamard (p - 1 prime, = 3 mod 4) or 1; with transpose, x <- x H^T. Fixed operation order, so every
++// backend gets the same bits.
++GGML_API bool ggml_rq_hadamard_factor(int64_t n, int * p, int * m);
++GGML_API float ggml_rq_act_clip(bool hadamard);
++GGML_API float ggml_rq_act_clip_for(float tensor_clip, bool hadamard); // env, else the tensor's, else 1
++GGML_API float ggml_rq_tensor_clip(const void * blocks);               // a W4A4 tensor's clip (block 0 header)
++GGML_API void quantize_row_a4_clip (const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k, float clip);
++GGML_API void quantize_row_a4h_clip(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k, float clip);
++GGML_API void ggml_rq_hadamard(float * GGML_RESTRICT x, int64_t n, bool transpose);
++GGML_API void quantize_row_w4a4_ref (const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k);
++GGML_API void quantize_row_w4a4h_ref(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k);
++GGML_API void quantize_row_a4_ref   (const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k);
++GGML_API void quantize_row_a4h_ref  (const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k);
+ GGML_API void quantize_row_q8_1_ref(const float * GGML_RESTRICT x, block_q8_1 * GGML_RESTRICT y, int64_t k);
+ 
+ GGML_API void quantize_row_mxfp4_ref(const float * GGML_RESTRICT x, block_mxfp4 * GGML_RESTRICT y, int64_t k);
+@@ -50,6 +66,10 @@ GGML_API void dequantize_row_q4_1(const block_q4_1 * GGML_RESTRICT x, float * GG
+ GGML_API void dequantize_row_q5_0(const block_q5_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+ GGML_API void dequantize_row_q5_1(const block_q5_1 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+ GGML_API void dequantize_row_q8_0(const block_q8_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
++GGML_API void dequantize_row_w4a4 (const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
++GGML_API void dequantize_row_w4a4h(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
++GGML_API void dequantize_row_a4   (const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
++GGML_API void dequantize_row_a4h  (const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+ //GGML_API void dequantize_row_q8_1(const block_q8_1 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+ 
+ GGML_API void dequantize_row_mxfp4(const block_mxfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+@@ -101,6 +121,8 @@ GGML_API size_t quantize_q4_1(const float * GGML_RESTRICT src, void * GGML_RESTR
+ GGML_API size_t quantize_q5_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+ GGML_API size_t quantize_q5_1(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+ GGML_API size_t quantize_q8_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
++GGML_API size_t quantize_w4a4 (const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
++GGML_API size_t quantize_w4a4h(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+ 
+ GGML_API size_t quantize_mxfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+ GGML_API size_t quantize_nvfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index 882cdf4..0cce112 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -734,6 +734,38 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
+         .to_float                 = (ggml_to_float_t) dequantize_row_q5_1,
+         .from_float_ref           = (ggml_from_float_t) quantize_row_q5_1_ref,
+     },
++    [GGML_TYPE_W4A4] = {
++        .type_name                = "w4a4",
++        .blck_size                = QK_W4A4,
++        .type_size                = sizeof(block_w4a4),
++        .is_quantized             = true,
++        .to_float                 = (ggml_to_float_t) dequantize_row_w4a4,
++        .from_float_ref           = (ggml_from_float_t) quantize_row_w4a4_ref,
++    },
++    [GGML_TYPE_W4A4H] = {
++        .type_name                = "w4a4h",
++        .blck_size                = QK_W4A4,
++        .type_size                = sizeof(block_w4a4),
++        .is_quantized             = true,
++        .to_float                 = (ggml_to_float_t) dequantize_row_w4a4h,
++        .from_float_ref           = (ggml_from_float_t) quantize_row_w4a4h_ref,
++    },
++    [GGML_TYPE_A4] = {
++        .type_name                = "a4",
++        .blck_size                = QK_W4A4,
++        .type_size                = sizeof(block_w4a4),
++        .is_quantized             = true,
++        .to_float                 = (ggml_to_float_t) dequantize_row_a4,
++        .from_float_ref           = (ggml_from_float_t) quantize_row_a4_ref,
++    },
++    [GGML_TYPE_A4H] = {
++        .type_name                = "a4h",
++        .blck_size                = QK_W4A4,
++        .type_size                = sizeof(block_w4a4),
++        .is_quantized             = true,
++        .to_float                 = (ggml_to_float_t) dequantize_row_a4h,
++        .from_float_ref           = (ggml_from_float_t) quantize_row_a4h_ref,
++    },
+     [GGML_TYPE_Q8_0] = {
+         .type_name                = "q8_0",
+         .blck_size                = QK8_0,
+@@ -8097,6 +8129,8 @@ size_t ggml_quantize_chunk(
+         case GGML_TYPE_Q5_0:    result = quantize_q5_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+         case GGML_TYPE_Q5_1:    result = quantize_q5_1   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+         case GGML_TYPE_Q8_0:    result = quantize_q8_0   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
++        case GGML_TYPE_W4A4:    result = quantize_w4a4   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
++        case GGML_TYPE_W4A4H:   result = quantize_w4a4h  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+         case GGML_TYPE_MXFP4:   result = quantize_mxfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+         case GGML_TYPE_NVFP4:   result = quantize_nvfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+         case GGML_TYPE_Q2_K:    result = quantize_q2_K   (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 9665cb0..56bb25e 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -5197,6 +5197,9 @@ struct test_mul_mat : public test_case {
+                 backend_has_feature(backend, "BLACKWELL_NATIVE_FP4")) {
+             return 2e-2;
+         }
++        if (type_a == GGML_TYPE_W4A4 || type_a == GGML_TYPE_W4A4H) {
++            return 0.0; // ruquant: every backend must reproduce the CPU reference bit for bit
++        }
+         return max_nmse_err();
+     }
+ 
+@@ -10633,6 +10636,25 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8192, 512, 5120, {128, 1}, {1, 1}));
+ #endif
+ 
++    // ruquant W4A4 / W4A4H: backends against the CPU reference (expected bit-identical)
++    for (ggml_type type_a : {GGML_TYPE_W4A4, GGML_TYPE_W4A4H}) {
++        for (int64_t n : {1, 3, 8, 17, 64, 200}) {
++            for (int64_t k : {256, 512, 1536, 5120, 6144}) {
++                test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 136, n, k, {1, 1}, {1, 1}));
++            }
++        }
++        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 5120, 32, 17408, {1, 1}, {1, 1}));
++        // the skinny dot8 path (rows a multiple of 64): every verify width, and widths that pad or chunk
++        for (int64_t n : {1, 2, 4, 5, 8, 16, 24, 32, 48, 64, 65, 130}) {
++            for (int64_t k : {256, 6144}) {
++                test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 256, n, k, {1, 1}, {1, 1}));
++            }
++        }
++        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 192, 8, 5120, {1, 1}, {1, 1}));
++        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 1024, 8, 5120, {1, 1}, {1, 1}));
++        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 5120, 8, 17408, {1, 1}, {1, 1}));
++    }
++
+     for (ggml_type type_a : all_types) {
+         for (int i = 1; i < 10; ++i) {
+             test_cases.emplace_back(new test_mul_mat(type_a,    GGML_TYPE_F32, 16,  i, 1*256, { 1,  1}, {1, 1}));

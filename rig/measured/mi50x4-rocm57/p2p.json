@@ -1,0 +1,14 @@
+{
+  "bench": "p2p", "toolchain": "hip", "devices": 4, "p2p": true,
+  "bandwidth": [
+    {"bytes": 1048576, "gbs": 6.43},
+    {"bytes": 16777216, "gbs": 7.12},
+    {"bytes": 268435456, "gbs": 7.15}
+  ],
+  "latency": [
+    {"bytes": 5120, "one_way_us": 6.20, "allreduce_us": 29.66},
+    {"bytes": 10240, "one_way_us": 6.63, "allreduce_us": 30.60},
+    {"bytes": 81920, "one_way_us": 18.64, "allreduce_us": 53.42},
+    {"bytes": 327680, "one_way_us": 59.11, "allreduce_us": 136.28}
+  ]
+}

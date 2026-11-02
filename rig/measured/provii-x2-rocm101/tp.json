@@ -1,0 +1,23 @@
+{
+  "bench": "tp", "toolchain": "hip", "devices": 2, "p2p": false, "rccl": true,
+  "pair_gbs": [[0.00, 1.44], [1.41, 0.00]],
+  "ring_gbs_per_link": 0.71, "fanin_gbs_per_link": 1.41,
+  "allreduce": [
+    {"gpus": 2, "method": "rccl", "tokens": 1, "bytes": 10240, "ok": true, "us": 36.19, "issue_us": 21.92},
+    {"gpus": 2, "method": "rccl", "tokens": 2, "bytes": 20480, "ok": true, "us": 43.53, "issue_us": 15.57},
+    {"gpus": 2, "method": "rccl", "tokens": 4, "bytes": 40960, "ok": true, "us": 61.36, "issue_us": 14.81},
+    {"gpus": 2, "method": "rccl", "tokens": 8, "bytes": 81920, "ok": true, "us": 101.06, "issue_us": 15.55},
+    {"gpus": 2, "method": "rccl", "tokens": 16, "bytes": 163840, "ok": true, "us": 183.21, "issue_us": 15.47},
+    {"gpus": 2, "method": "rccl", "tokens": 32, "bytes": 327680, "ok": true, "us": 328.35, "issue_us": 15.72},
+    {"gpus": 2, "method": "rccl", "tokens": 64, "bytes": 655360, "ok": true, "us": 1277.70, "issue_us": 16.22},
+    {"gpus": 2, "method": "rccl", "tokens": 409, "bytes": 4188160, "ok": true, "us": 3683.08, "issue_us": 17.27},
+    {"gpus": 2, "method": "copy", "tokens": 1, "bytes": 10240, "ok": true, "us": 83.92, "issue_us": 83.85},
+    {"gpus": 2, "method": "copy", "tokens": 2, "bytes": 20480, "ok": true, "us": 77.49, "issue_us": 77.41},
+    {"gpus": 2, "method": "copy", "tokens": 4, "bytes": 40960, "ok": true, "us": 106.34, "issue_us": 106.27},
+    {"gpus": 2, "method": "copy", "tokens": 8, "bytes": 81920, "ok": true, "us": 166.10, "issue_us": 166.02},
+    {"gpus": 2, "method": "copy", "tokens": 16, "bytes": 163840, "ok": true, "us": 279.87, "issue_us": 279.79},
+    {"gpus": 2, "method": "copy", "tokens": 32, "bytes": 327680, "ok": true, "us": 667.81, "issue_us": 667.72},
+    {"gpus": 2, "method": "copy", "tokens": 64, "bytes": 655360, "ok": true, "us": 966.45, "issue_us": 966.36},
+    {"gpus": 2, "method": "copy", "tokens": 409, "bytes": 4188160, "ok": true, "us": 6126.04, "issue_us": 6123.13}
+  ]
+}

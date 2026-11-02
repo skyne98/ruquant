@@ -1,0 +1,11 @@
+{
+  "bench": "valu", "toolchain": "hip", "device": 0, "name": "AMD Radeon Pro VII", "cus": 60, "max_clock_mhz": 1700.0, "iters": 32768,
+  "note": "full rate = 64 lane-instructions/clk/CU (GCN wave64)",
+  "ops": [
+    {"op": "dot8_i32_i4", "macs_per_lane_instr": 8, "ms": 44.287, "clock_mhz": 1567.7, "lane_instr_per_clk_per_cu": 61.86, "full_rate_fraction": 0.967, "tmacs": 46.55, "dependent_cycles_per_instr": 9.51},
+    {"op": "dot4_i32_i8", "macs_per_lane_instr": 4, "ms": 44.683, "clock_mhz": 1559.3, "lane_instr_per_clk_per_cu": 61.64, "full_rate_fraction": 0.963, "tmacs": 23.07, "dependent_cycles_per_instr": 9.51},
+    {"op": "fma_f32", "macs_per_lane_instr": 1, "ms": 42.842, "clock_mhz": 1583.0, "lane_instr_per_clk_per_cu": 63.33, "full_rate_fraction": 0.990, "tmacs": 6.02, "dependent_cycles_per_instr": 8.51},
+    {"op": "pk_fma_f16", "macs_per_lane_instr": 2, "ms": 41.024, "clock_mhz": 1699.7, "lane_instr_per_clk_per_cu": 61.59, "full_rate_fraction": 0.962, "tmacs": 12.56, "dependent_cycles_per_instr": 8.01}
+  ],
+  "launch_us": 1.39
+}

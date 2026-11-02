@@ -1,0 +1,78 @@
+Fetching 29 files:   0%|          | 0/29 [00:00<?, ?it/s]Fetching 29 files: 100%|██████████| 29/29 [00:00<00:00, 6393.08it/s]
+[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (2505800 > 262144). Running this sequence through the model will result in indexing errors
+accuracy/ref/ud-q8_k_xl-16.kld: 16 x 2048 eval, 48 x 2048 calibration; recipes w4a4, wg256, ag256, g256, g128
+[transformers] `causal_conv1d_fn` is falling back to its reference PyTorch implementation because `causal_conv1d` is not installed. This is correct but much slower; install `causal_conv1d` for the optimized kernel.
+layer  0 (linear)  26.4 s
+layer  1 (linear)  25.1 s
+layer  2 (linear)  24.5 s
+layer  3 (full_a)  23.0 s
+layer  4 (linear)  23.9 s
+layer  5 (linear)  25.4 s
+layer  6 (linear)  26.7 s
+layer  7 (full_a)  24.6 s
+layer  8 (linear)  24.8 s
+layer  9 (linear)  23.9 s
+layer 10 (linear)  25.7 s
+layer 11 (full_a)  24.6 s
+layer 12 (linear)  25.6 s
+layer 13 (linear)  26.3 s
+layer 14 (linear)  24.7 s
+layer 15 (full_a)  23.1 s
+layer 16 (linear)  23.9 s
+layer 17 (linear)  24.3 s
+layer 18 (linear)  25.0 s
+layer 19 (full_a)  22.5 s
+layer 20 (linear)  25.4 s
+layer 21 (linear)  25.3 s
+layer 22 (linear)  25.4 s
+layer 23 (full_a)  22.9 s
+layer 24 (linear)  25.8 s
+layer 25 (linear)  25.7 s
+layer 26 (linear)  25.4 s
+layer 27 (full_a)  21.3 s
+layer 28 (linear)  22.7 s
+layer 29 (linear)  22.3 s
+layer 30 (linear)  22.4 s
+layer 31 (full_a)  21.1 s
+layer 32 (linear)  22.2 s
+layer 33 (linear)  22.3 s
+layer 34 (linear)  22.6 s
+layer 35 (full_a)  21.1 s
+layer 36 (linear)  22.7 s
+layer 37 (linear)  23.0 s
+layer 38 (linear)  22.1 s
+layer 39 (full_a)  20.9 s
+layer 40 (linear)  22.7 s
+layer 41 (linear)  22.7 s
+layer 42 (linear)  22.3 s
+layer 43 (full_a)  21.3 s
+layer 44 (linear)  22.4 s
+layer 45 (linear)  22.2 s
+layer 46 (linear)  22.2 s
+layer 47 (full_a)  21.3 s
+layer 48 (linear)  22.8 s
+layer 49 (linear)  22.1 s
+layer 50 (linear)  23.2 s
+layer 51 (full_a)  21.1 s
+layer 52 (linear)  22.2 s
+layer 53 (linear)  22.3 s
+layer 54 (linear)  22.5 s
+layer 55 (full_a)  21.5 s
+layer 56 (linear)  29.1 s
+layer 57 (linear)  27.9 s
+layer 58 (linear)  28.2 s
+layer 59 (full_a)  26.8 s
+layer 60 (linear)  28.3 s
+layer 61 (linear)  28.6 s
+layer 62 (linear)  28.5 s
+layer 63 (full_a)  26.6 s
+/home/fox/Experiments/ruquant/accuracy/eval_w4a4.py:351: UserWarning: The given NumPy array is not writable, and PyTorch does not support non-writable tensors. This means writing to this tensor will result in undefined behavior. You may want to copy the array to protect its data or make it writable before converting it to a tensor. This type of warning will be suppressed for the rest of this program. (Triggered internally at /__w/pytorch/pytorch/torch/csrc/utils/tensor_numpy.cpp:213.)
+  q = torch.from_numpy(raw[:, 4:4 + self.n_vocab].view(self.np.int16)).to(device).int() & 0xFFFF
+
+recipe            ppl  KL/token  top-1 agree   (vs accuracy/ref/ud-q8_k_xl-16.kld, first 16 chunks)
+w4a4            6.175    0.0851       87.81%
+wg256           6.194    0.0814       88.32%
+ag256           6.169    0.0706       88.92%
+g256            6.190    0.0652       89.61%
+g128            6.149    0.0631       89.75%
+-> accuracy/results/groups-16.json

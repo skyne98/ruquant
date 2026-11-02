@@ -8,3 +8,12 @@ result
 # written by build.rs, holds /nix/store paths
 kernels/compile_flags.txt
 gfx906/build
+rig/build
+rig/build-ggml
+rig/results
+dist
+/.venv
+/build-llama
+/accuracy/ref
+/models
+/.nix-dev-profile*

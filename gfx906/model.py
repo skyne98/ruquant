@@ -248,7 +248,9 @@ class GPU:
         self.lds, self.l1 = 128.0, 64.0
         self.lds_per_cu = 64 * 1024
         self.smem = a.smem  # scalar cache B/clk per CU (shared cache): unverified assumption
-        self.l2 = 16 * 64 * self.hz  # 16 channels x 64 B/clk, for split-K partials
+        # split-K partials: assumed at L2 bandwidth (16 channels x 64 B/clk) unless measured
+        self.l2 = a.atomic_gbs * 1e9 if a.atomic_gbs else 16 * 64 * self.hz
+        self.dot8_rate = a.dot8_rate  # fraction of a full-rate VALU op (1.0 assumed)
         self.attn_eff = a.attn_eff
         self.wave_rate = self.cus * self.hz  # VALU wave-instructions per second, whole GPU
 
@@ -256,7 +258,7 @@ class GPU:
         """CU-cycles per multiply-add on each pipe, from one loop iteration's mix."""
         macs = LANES * lane_macs(c)
         return {
-            "valu": (c.get("valu", 0) + dots(c)) / macs,
+            "valu": (c.get("valu", 0) + c.get("dot4", 0) + c.get("dot8", 0) / self.dot8_rate) / macs,
             "salu": c.get("salu", 0) / macs,
             "lds": c["lds_B"] / self.lds / macs,
             "l1": c["l1_B"] / self.l1 / macs,
@@ -282,7 +284,7 @@ def w4a4_matmul(gpu, T, K, N, mix, R, occupancy):
     groups, steps = max(1, math.ceil(N / (LANES * R))), max(1, K // 8 // 4)
     best = None
     for W in (1, 2, 4, 8):
-        lds = (W - 1) * R * T * LANES * 4
+        lds = R * T * LANES * 4 if W > 1 else 0  # one buffer, waves 1..W-1 add into it
         if lds > gpu.lds_per_cu or steps < W:
             continue
         wg_per_cu = gpu.lds_per_cu // lds if lds else 99
@@ -293,7 +295,7 @@ def w4a4_matmul(gpu, T, K, N, mix, R, occupancy):
             resident = min(waves, gpu.simds * per_simd)
             bw = min(gpu.bw, resident * R * LANES * 16 / gpu.latency)
             mem = hbm_bytes / bw
-            reduce_lds = 2 * (W - 1) * T * N * 4 / (gpu.lds * gpu.wave_rate)
+            reduce_lds = 2 * W * T * N * 4 / (gpu.lds * gpu.wave_rate) if W > 1 else 0.0  # store, adds, load
             partials = (2 * G * T * N * 4 + T * N * 4) / gpu.l2 if G > 1 else 0.0  # atomics + memset
             t = max(mem, comp) + reduce_lds + partials
             limit = pipe if comp >= mem else ("hbm" if bw >= gpu.bw else "latency")
@@ -305,11 +307,48 @@ def w4a4_matmul(gpu, T, K, N, mix, R, occupancy):
     return best
 
 
+class Measured:
+    """Matmul times the rig measured on the card (rig/results/<dir>), used instead of the roofline
+    for every shape it has: skinny-gpu0.json for w4a4 (best split and R per point), ggml-gpu0.json
+    for today (q4_0 linears, q6_K lm_head). T between measured widths is interpolated linearly,
+    past the widest extrapolated from the last two. A tensor split still takes 1/gpus of the
+    full-size time, which flatters it: the real per-GPU slices are smaller and less efficient."""
+
+    def __init__(self, d):
+        self.d, self.pts = Path(d), {}  # (kind, K, N) -> {T: seconds}
+        for name in ("skinny-gpu0.json", "ggml-gpu0.json"):
+            f = self.d / name
+            if not f.exists():
+                continue
+            for p in json.loads(f.read_text())["points"]:
+                kind = "w4a4" if name.startswith("skinny") else ("lm" if p["type"] == "q6_K" else "today")
+                ts = self.pts.setdefault((kind, p["K"], p["N"]), {})
+                ts[p["T"]] = min(ts.get(p["T"], math.inf), p["us"] * 1e-6)
+
+    def kinds(self):
+        return sorted({k[0] for k in self.pts})
+
+    def get(self, kind, T, K, N):
+        ts = self.pts.get((kind, K, N))
+        if not ts:
+            return None
+        if T in ts:
+            return ts[T]
+        xs = sorted(ts)
+        if len(xs) == 1:
+            return ts[xs[0]]
+        lo, hi = [x for x in xs if x < T], [x for x in xs if x > T]
+        a, b = (lo[-1], hi[0]) if lo and hi else ((xs[-2], xs[-1]) if lo else (xs[0], xs[1]))
+        return ts[a] + (ts[b] - ts[a]) * (T - a) / (b - a)
+
+
 class Model:
-    def __init__(self, gpu, today, w4a4, a):
-        self.gpu, self.today, self.w4a4, self.a = gpu, today, w4a4, a
+    def __init__(self, gpu, today, w4a4, a, measured=None):
+        self.gpu, self.today, self.w4a4, self.a, self.measured = gpu, today, w4a4, a, measured
 
     def linear(self, path, T, K, N):
+        if self.measured and (t := self.measured.get(path, T, K, N)) is not None:
+            return t
         g = self.gpu
         if path == "today":
             mem = (N * K * Q4_0 + T * K * Q8_1 + T * N * 4) / g.bw
@@ -365,9 +404,17 @@ class Model:
     def lm_head(self, arch, T):
         """q6_K output projection with ggml's kernel in both paths (A4 on lm_head costs quality)."""
         K, N = arch.lm_head
+        if self.measured and (t := self.measured.get("lm", T, K, N)) is not None:
+            return t
         mem = (N * K * self.a.lm_bpw / 8) / self.gpu.bw
         comp, _ = self.gpu.compute_s(T * N * K, self.today[mix_for(T)])
         return max(mem, comp)
+
+    def allreduce_s(self, nbytes):
+        """One all-reduce across the GPUs of a tensor split: a fixed cost plus bytes at the
+        all-reduce's effective rate (both fitted by rig/calibrate.py from bench_tp)."""
+        rate = self.a.allreduce_gbs * 1e9 if self.a.allreduce_gbs > 0 else float("inf")
+        return self.a.allreduce_us * 1e-6 + nbytes / rate
 
     def step(self, arch, path, T, ctx, split="layer"):
         """One decoding step. T=1 is plain autoregressive decoding; T>1 is DFlash2 with block T.
@@ -375,7 +422,7 @@ class Model:
         split "layer": each GPU holds a run of layers and they take turns (llama.cpp's default):
         capacity scales, bandwidth doesn't; one activation hand-off per GPU boundary.
         split "tensor": every GPU holds a slice of every layer: ideal 1/gpus of the work plus
-        two all-reduces per layer."""
+        two all-reduces per layer of T x hidden f16 activations."""
         gpus = arch.gpus
         target = self.forward(arch.target, path, T, ctx)
         share = 1 / gpus if split == "tensor" else 1.0
@@ -383,7 +430,7 @@ class Model:
         if gpus == 1:
             out["comm"] = 0.0
         elif split == "tensor":
-            out["comm"] = 2 * arch.target.layers * self.a.allreduce_us * 1e-6
+            out["comm"] = 2 * arch.target.layers * self.allreduce_s(T * arch.lm_head[0] * 2)
         else:
             out["comm"] = (gpus - 1) * self.a.handoff_us * 1e-6
         if T > 1:
@@ -437,7 +484,8 @@ def print_arch(model, arch, ctx):
 def print_steps(model, arch, ctx, split):
     if arch.gpus > 1:
         how = ("GPUs take turns over layer runs" if split == "layer"
-               else f"tensor parallel, {model.a.allreduce_us:.0f} us per all-reduce")
+               else f"tensor parallel, all-reduce {model.a.allreduce_us:.0f} us"
+               + (f" + bytes at {model.a.allreduce_gbs:.1f} GB/s" if model.a.allreduce_gbs > 0 else ""))
         print(f"  -- {split} split: {how}")
     print(f"  step ms       {'today':>34}   {'w4a4':>34}")
     print(f"  {'T':>4}  {'target':>8}{'drafter':>8}{'lm_head':>8}{'step':>9}    "
@@ -470,34 +518,48 @@ def print_detail(model, arch, T, ctx):
         print(f"    {path:<6} {line}")
 
 
-def main():
+def make_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--clock", type=float, default=1.725, help="GHz (MI50 peak engine clock)")
     p.add_argument("--bw", type=float, default=1024, help="GB/s HBM2 peak")
     p.add_argument("--bw-eff", type=float, default=0.80, help="achievable fraction of --bw (measure on the card)")
     p.add_argument("--smem", type=float, default=4.0, help="scalar cache B/clk per CU (assumed 16 B/clk per 4 CUs)")
+    p.add_argument("--dot8-rate", type=float, default=1.0, help="v_dot8 issue rate as a fraction of full VALU rate")
+    p.add_argument("--atomic-gbs", type=float, default=0.0, help="split-K partials rate, GB/s (default: L2 bandwidth)")
     p.add_argument("--latency", type=float, default=1000, help="ns, HBM latency under load (guess; measure)")
     p.add_argument("--ctx", type=int, default=8192, help="tokens in the KV cache")
     p.add_argument("--attn-eff", type=float, default=0.5, help="fraction of packed-fp16 peak attention reaches")
     p.add_argument("--lm-bpw", type=float, default=6.5625, help="lm_head bits per weight (q6_K)")
-    p.add_argument("--allreduce-us", type=float, default=15, help="per all-reduce, tensor split (guess)")
+    p.add_argument("--allreduce-us", type=float, default=15, help="fixed cost per all-reduce, tensor split (guess)")
+    p.add_argument("--allreduce-gbs", type=float, default=0.0,
+                   help="all-reduce bytes per second on top of the fixed cost, GB/s (default: free)")
     p.add_argument("--handoff-us", type=float, default=10, help="per GPU boundary, layer split (guess)")
     p.add_argument("--expert-reuse", type=float, default=0.0,
                    help="0 = draft tokens route independently (worst case); 1 = all share experts")
     p.add_argument("--gpus-27b", type=int, default=QWEN38_27B.gpus)
     p.add_argument("--gpus-flash-next", type=int, default=QWEN38_FLASH_NEXT.gpus)
+    p.add_argument("--measured", metavar="DIR",
+                   help="rig results dir: use its measured matmul times wherever it has the shape")
     p.add_argument("--detail", action="append", default=[], help="ARCH:T component breakdown, e.g. 27b:8")
     p.add_argument("--kernels", action="store_true", help="also print the per-kernel instruction table")
-    a = p.parse_args()
+    return p
+
+
+def main():
+    a = make_parser().parse_args()
     QWEN38_27B.gpus, QWEN38_FLASH_NEXT.gpus = a.gpus_27b, a.gpus_flash_next
 
     gpu = GPU(a)
     today, w4a4 = kernels(HERE / "build")
     if a.kernels:
         print_kernels(gpu, today, w4a4)
-    model = Model(gpu, today, w4a4, a)
+    measured = Measured(a.measured) if a.measured else None
+    model = Model(gpu, today, w4a4, a, measured)
     print(f"MI50 at {a.clock} GHz, {a.bw:.0f} GB/s x {a.bw_eff}, {a.latency:.0f} ns latency, "
           f"attention at {a.attn_eff} of packed-fp16 peak")
+    if measured:
+        print(f"matmuls measured on the card ({', '.join(measured.kinds()) or 'none found'}) from {measured.d}; "
+              "the rest from the roofline")
     for arch in ARCHS.values():
         print_arch(model, arch, a.ctx)
     for d in a.detail:

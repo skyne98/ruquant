@@ -1,0 +1,74 @@
+accuracy/ref/ud-q8_k_xl.kld: 64 chunks of 2048, evaluating 64 x 2048 = 131072; layers 64; configs w4a8-rot, w4a4-rot, w4a4-rot-gptq
+[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (2505800 > 262144). Running this sequence through the model will result in indexing errors
+layer  0 (linear)  31.6 s  
+layer  1 (linear)  31.3 s  
+layer  2 (linear)  30.2 s  
+layer  3 (full_a)  28.3 s  
+layer  4 (linear)  30.3 s  
+layer  5 (linear)  30.2 s  
+layer  6 (linear)  30.2 s  
+layer  7 (full_a)  28.7 s  
+layer  8 (linear)  30.4 s  
+layer  9 (linear)  30.3 s  
+layer 10 (linear)  30.3 s  
+layer 11 (full_a)  28.3 s  
+layer 12 (linear)  30.3 s  
+layer 13 (linear)  30.3 s  
+layer 14 (linear)  30.2 s  
+layer 15 (full_a)  28.3 s  
+layer 16 (linear)  30.2 s  
+layer 17 (linear)  30.3 s  
+layer 18 (linear)  30.3 s  
+layer 19 (full_a)  28.3 s  
+layer 20 (linear)  30.4 s  
+layer 21 (linear)  30.3 s  
+layer 22 (linear)  30.4 s  
+layer 23 (full_a)  28.3 s  
+layer 24 (linear)  30.3 s  
+layer 25 (linear)  30.4 s  
+layer 26 (linear)  30.3 s  
+layer 27 (full_a)  28.5 s  
+layer 28 (linear)  30.4 s  
+layer 29 (linear)  30.4 s  
+layer 30 (linear)  30.7 s  
+layer 31 (full_a)  28.3 s  
+layer 32 (linear)  30.3 s  
+layer 33 (linear)  30.3 s  
+layer 34 (linear)  30.5 s  
+layer 35 (full_a)  28.5 s  
+layer 36 (linear)  30.4 s  
+layer 37 (linear)  30.5 s  
+layer 38 (linear)  30.4 s  
+layer 39 (full_a)  28.4 s  
+layer 40 (linear)  30.4 s  
+layer 41 (linear)  30.3 s  
+layer 42 (linear)  30.4 s  
+layer 43 (full_a)  28.6 s  
+layer 44 (linear)  31.2 s  
+layer 45 (linear)  30.7 s  
+layer 46 (linear)  30.9 s  
+layer 47 (full_a)  28.6 s  
+layer 48 (linear)  30.4 s  
+layer 49 (linear)  30.3 s  
+layer 50 (linear)  30.6 s  
+layer 51 (full_a)  28.4 s  
+layer 52 (linear)  30.5 s  
+layer 53 (linear)  30.5 s  
+layer 54 (linear)  30.4 s  
+layer 55 (full_a)  28.4 s  
+layer 56 (linear)  30.7 s  
+layer 57 (linear)  30.4 s  
+layer 58 (linear)  30.4 s  
+layer 59 (full_a)  28.4 s  
+layer 60 (linear)  30.4 s  
+layer 61 (linear)  30.6 s  
+layer 62 (linear)  30.4 s  
+layer 63 (full_a)  28.4 s  
+  q = torch.from_numpy(raw[:, 4:4 + self.n_vocab].view(self.np.int16)).to(device).int() & 0xFFFF
+
+config          ppl  KL/token  top-1 agree
+ref           5.907    0.0000     (ref)
+w4a8-rot      6.250    0.0930       87.37%
+w4a4-rot      6.708    0.1825       82.43%
+w4a4-rot-gptq    6.395    0.1088       86.49%
+-> accuracy/results/qwen3.8-27b-vs-ud-q8.json

@@ -1,0 +1,11 @@
+{
+  "bench": "valu", "toolchain": "hip", "device": 2, "name": "AMD Radeon Graphics", "cus": 60, "max_clock_mhz": 1800.0, "iters": 32768,
+  "note": "full rate = 64 lane-instructions/clk/CU (GCN wave64)",
+  "ops": [
+    {"op": "dot8_i32_i4", "macs_per_lane_instr": 8, "ms": 42.188, "clock_mhz": 1621.1, "lane_instr_per_clk_per_cu": 62.80, "full_rate_fraction": 0.981, "tmacs": 48.87, "dependent_cycles_per_instr": 9.55},
+    {"op": "dot4_i32_i8", "macs_per_lane_instr": 4, "ms": 42.445, "clock_mhz": 1586.5, "lane_instr_per_clk_per_cu": 63.78, "full_rate_fraction": 0.997, "tmacs": 24.29, "dependent_cycles_per_instr": 9.51},
+    {"op": "fma_f32", "macs_per_lane_instr": 1, "ms": 41.570, "clock_mhz": 1643.3, "lane_instr_per_clk_per_cu": 62.87, "full_rate_fraction": 0.982, "tmacs": 6.20, "dependent_cycles_per_instr": 8.55},
+    {"op": "pk_fma_f16", "macs_per_lane_instr": 2, "ms": 38.743, "clock_mhz": 1799.7, "lane_instr_per_clk_per_cu": 61.60, "full_rate_fraction": 0.962, "tmacs": 13.30, "dependent_cycles_per_instr": 8.01}
+  ],
+  "launch_us": 1.24
+}

@@ -1,9 +1,10 @@
 //! Binds and builds everything C/C++ for ruquant:
-//!   1. bindgen over OUR ggml headers (third_party/llama.cpp, patched, built into build-ggml/)
-//!   2. our kernels: kernels/*.cu via nvcc (the hook that hands them to ggml is src/kernels.rs)
+//!   1. bindgen over the ggml headers of our llama.cpp fork (build-llama/src, see build-llama.sh)
+//!   2. our kernels: kernels/*.cu via nvcc, when this machine has CUDA (the hook that hands them
+//!      to ggml is src/kernels.rs; without CUDA the crate builds without them, cfg rq_cuda off)
 //!   3. kernels/compile_flags.txt so clangd resolves the same headers the compilers get
 //!
-//! Prerequisite: ./build-ggml.sh. This script never builds ggml itself.
+//! Prerequisite: ./build-llama.sh. This script never builds ggml itself.
 
 use std::env;
 use std::fs;
@@ -12,21 +13,28 @@ use std::process::Command;
 
 fn main() {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let bin = root.join("build-ggml/bin");
+    let bin = root.join("build-llama/build/bin");
     if !bin.join("libggml.so").exists() {
         panic!(
-            "build-ggml/bin/libggml.so not found — run ./build-ggml.sh first \
-             (it builds our patched ggml tree; this crate only links it)"
+            "build-llama/build/bin/libggml.so not found: run ./build-llama.sh first \
+             (it builds our llama.cpp fork; this crate only links it)"
         );
     }
 
-    let ggml = root.join("third_party/llama.cpp/ggml");
+    let ggml = root.join("build-llama/src/ggml");
     let include = ggml.join("include");
     let src = ggml.join("src");
     let cuda = env::var("CUDA_PATH").ok();
+    let has_cuda = bin.join("libggml-cuda.so").exists()
+        && Command::new("nvcc").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
 
-    emit_bindings(&root, &[&include, &src], cuda.as_deref());
-    build_kernels(&root);
+    println!("cargo:rustc-check-cfg=cfg(rq_cuda)");
+    let llama_include = root.join("build-llama/src/include");
+    emit_bindings(&root, &[&include, &src, &llama_include], cuda.as_deref());
+    if has_cuda {
+        println!("cargo:rustc-cfg=rq_cuda");
+        build_kernels(&root);
+    }
     write_clangd_flags(&root, &[&include, &src], cuda.as_deref());
     link_ggml(&root, &bin, cuda.as_deref());
 }
@@ -39,7 +47,9 @@ fn emit_bindings(root: &Path, includes: &[&PathBuf], cuda: Option<&str>) {
     let mut builder = bindgen::Builder::default()
         .header(header.to_str().unwrap())
         .allowlist_function("ggml.*")
+        .allowlist_function("llama.*")
         .allowlist_type("ggml.*")
+        .allowlist_type("llama.*")
         .allowlist_var("GGML.*")
         .allowlist_var("ggml.*")
         .default_enum_style(bindgen::EnumVariation::Consts)
@@ -111,8 +121,11 @@ fn write_clangd_flags(root: &Path, includes: &[&PathBuf], cuda: Option<&str>) {
 
 fn link_ggml(root: &Path, bin: &Path, cuda: Option<&str>) {
     println!("cargo:rustc-link-search=native={}", bin.display());
-    for lib in ["ggml", "ggml-base", "ggml-cuda", "ggml-cpu", "ggml-vulkan"] {
-        println!("cargo:rustc-link-lib=dylib={lib}");
+    // whichever backends this machine's build-llama.sh produced
+    for lib in ["llama", "ggml", "ggml-base", "ggml-cpu", "ggml-cuda", "ggml-hip", "ggml-vulkan"] {
+        if bin.join(format!("lib{lib}.so")).exists() {
+            println!("cargo:rustc-link-lib=dylib={lib}");
+        }
     }
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", bin.display());
 

@@ -1,0 +1,13 @@
+captured 524288 normed residual vectors in 85 s
+held-out relative error: random Hadamard 0.00856
+  step    0  train 0.00855  held-out 0.00848  (0.991x)
+  step   50  train 0.00812  held-out 0.00807  (0.943x)
+  step  100  train 0.00775  held-out 0.00778  (0.909x)
+  step  150  train 0.00748  held-out 0.00752  (0.879x)
+  step  200  train 0.00730  held-out 0.00732  (0.856x)
+  step  250  train 0.00710  held-out 0.00715  (0.836x)
+  step  300  train 0.00694  held-out 0.00700  (0.818x)
+  step  350  train 0.00681  held-out 0.00687  (0.803x)
+  step  399  train 0.00674  held-out 0.00678  (0.792x)
+orthogonality error 3.34e-06
+-> accuracy/ref/r1-learned.f32 (5120 x 5120 f32, y = x R1)

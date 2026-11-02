@@ -1,0 +1,49 @@
+{
+ "args": {
+  "seqs": 2,
+  "seqlen": 2048,
+  "batch": 4,
+  "chunk": 512,
+  "layers": 2,
+  "calib_seqs": 4,
+  "configs": null,
+  "ref": "accuracy/ref/ud-q8_k_xl-16.kld",
+  "ref_bos": null,
+  "out": "accuracy/results/smoke-recipes.json",
+  "recipes": [
+   "w4a4",
+   "g128-mixed"
+  ],
+  "selftest": false
+ },
+ "results": {
+  "w4a4": {
+   "ppl": 12619.301459691394,
+   "kl": 7.6656862857404695,
+   "top1": 0.024926686217008796,
+   "tokens": 2046,
+   "recipe": {
+    "name": "w4a4",
+    "group": 0,
+    "abits_read": 4,
+    "abits_write": 4,
+    "clip4": 0.8,
+    "clip8": 1.0
+   }
+  },
+  "g128-mixed": {
+   "ppl": 12571.522487085418,
+   "kl": 7.6619924356977025,
+   "top1": 0.024926686217008796,
+   "tokens": 2046,
+   "recipe": {
+    "name": "g128-mixed",
+    "group": 128,
+    "abits_read": 8,
+    "abits_write": 4,
+    "clip4": 0.8,
+    "clip8": 1.0
+   }
+  }
+ }
+}

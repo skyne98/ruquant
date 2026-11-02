@@ -149,15 +149,15 @@ def parse(path: str) -> list:
         t = BRANCH_TARGET.match(line)
         if t:
             block.targets.append(t.group(1))
+            # a branch ends the block; what follows is reached by fall-through and has no label
+            block = Block(f"{block.label}~", [], [])
+            cur.blocks.append(block)
 
     # resource comments follow the function body
     meta_pat = re.compile(r";\s*(NumVgprs|NumSgprs|Occupancy|ScratchSize|LDSByteSize|NumVGPRsForWavesPerEU|NumSGPRsForWavesPerEU|codeLenInByte):\s*(\d+)")
     by_name = {k.name: k for k in kernels}
     current = None
     for raw in text:
-        m = re.match(r"\s*\.amdhsa_kernel\s+(\S+)", raw)
-        hdr = re.match(r"; Kernel info:", raw.strip())
-        fn = re.match(r";\s*-+\s*$", raw.strip())
         mm = re.match(r"^(\S+):(\s*;.*)?$", raw.strip())
         if mm and mm.group(1) in by_name:
             current = by_name[mm.group(1)]

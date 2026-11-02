@@ -1,0 +1,6 @@
+accuracy/ref/ud-q8_k_xl-16.kld: 16 x 2048 eval, 64 x 2048 calibration; recipes w4a4, mixed, w4a8, g128-w4a4, g128-mixed, g128-w4a8
+layer  0 (linear)  21.7 s
+layer  1 (linear)  21.5 s
+layer  2 (linear)  20.8 s
+layer  3 (full_a)  21.2 s
+layer  4 (linear)  22.6 s

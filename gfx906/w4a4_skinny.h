@@ -73,25 +73,36 @@ inline size_t rq_act_index(int t, int k_word, int T, int KA) {
     return ((size_t)(k_word / KA) * T + t) * KA + k_word % KA;
 }
 
-// Bytes of dynamic LDS for a launch with W waves per workgroup.
-template <int T> constexpr size_t rq_lds_bytes(int W) {
-    return (size_t)(W - 1) * rq_cfg<T>::R * T * RQ_WAVE * sizeof(int32_t);
+// Bytes of dynamic LDS for a launch with W waves per workgroup: one R*T*wave int32 buffer
+// whatever W is, so LDS never caps occupancy below what the VGPRs allow.
+template <int T, int R = rq_cfg<T>::R> constexpr size_t rq_lds_bytes(int W) {
+    return W > 1 ? (size_t)R * T * RQ_WAVE * sizeof(int32_t) : 0;
 }
 
 // Ac:  activation words (spec values: element 8w+j in bits [4j+3:4j], stored as q-8), rq_act_index
 // Wt:  weight words, rq_wt_index
 // acc: [T][N] int32. Zeroed before launch when gridDim.y > 1 (atomic adds), else just written.
-// grid (N / (RQ_WAVE*R), ceil(Kw / kw_split)), block RQ_WAVE*W (W <= 8), rq_lds_bytes<T>(W)
+// grid (N / (RQ_WAVE*R), ceil(Kw / kw_split)), block RQ_WAVE*W (W <= 8), rq_lds_bytes<T, R>(W)
 // dynamic LDS; Kw and kw_split multiples of 4.
 // Split-K happens in two places: the W waves of a workgroup take slices of its K range and
 // reduce through LDS (cheap), and workgroups along y take kw_split chunks and add atomically
-// in L2 (expensive at large T: 4 bytes per output per split).
-template <int T, int R = rq_cfg<T>::R, int KA = rq_cfg<T>::KA, int TB = rq_cfg<T>::TB>
+// in L2 (expensive at large T: 4 bytes per output per split). Both are integer adds, so the
+// result is bit-exact in any order.
+// PF: activations one token block ahead (see the loop). It is on from T = 24, where a block is
+// only 32 dot8s and two blocks of SGPRs still fit (TB*KA <= 32). Below that a block has enough
+// dot8s (T = 16: 128) or the loop is weight-bound, and PF only adds register copies.
+// -DRQ_PREFETCH=0 turns it off, to measure what it buys.
+#ifndef RQ_PREFETCH
+#define RQ_PREFETCH 1
+#endif
+template <int T, int R = rq_cfg<T>::R, int KA = rq_cfg<T>::KA, int TB = rq_cfg<T>::TB,
+          bool PF = RQ_PREFETCH && T >= 24 && TB * KA <= 32>
 __global__ void __launch_bounds__(RQ_WAVE * 8)
 w4a4_skinny(const int32_t* __restrict__ Ac, const int32_t* __restrict__ Wt,
             int32_t* __restrict__ acc, int N, int Kw, int kw_split) {
     static_assert(RQ_KW % KA == 0 && T % TB == 0, "bad preset");
     constexpr int CHUNKS = RQ_KW / KA;
+    constexpr int NB = CHUNKS * (T / TB); // token blocks per step
     const int lane = threadIdx.x % RQ_WAVE;
     const int wave = rq_wave_id(), W = blockDim.x / RQ_WAVE;
     const int g0 = blockIdx.x * R;
@@ -123,46 +134,74 @@ w4a4_skinny(const int32_t* __restrict__ Ac, const int32_t* __restrict__ Wt,
 #pragma unroll
         for (int r = 0; r < R; ++r) cur[r] = wp[r][0];
 
+    // Activations: block q = s*NB + c*(T/TB) + b sits at ap[q] (uniform -> SGPRs). Without PF a
+    // block's s_loads issue right before its dot8s and the wave waits out the whole scalar
+    // latency, covered only by the other waves' dot8s; with T >= 24 a block is just 32 dot8s
+    // and that is not enough. With PF the next block's load goes out while this block runs.
+    // SMEM returns out of order, so a wait for this block's SGPRs is a wait for every scalar
+    // load in flight: the block's first dot8 (which carries that wait) stays ahead of the
+    // fence that releases the next load.
+    const int nblocks = steps * NB;
+    rq_words<TB * KA> a_cur;
+    if (PF && steps > 0) a_cur = ap[0];
+
     for (int s = 0; s < steps; ++s) {
         const int s_next = s + 1 < steps ? s + 1 : s; // last step re-reads, no branch
 #pragma unroll
         for (int r = 0; r < R; ++r) nxt[r] = wp[r][(size_t)s_next * RQ_WAVE];
 
 #pragma unroll
-        for (int c = 0; c < CHUNKS; ++c)
-#pragma unroll
-            for (int b = 0; b < T / TB; ++b) {
-                const rq_words<TB * KA> a = ap[((size_t)s * CHUNKS + c) * (T / TB) + b]; // uniform -> SGPRs
-#pragma unroll
-                for (int tt = 0; tt < TB; ++tt)
-#pragma unroll
-                    for (int r = 0; r < R; ++r)
-#pragma unroll
-                        for (int j = 0; j < KA; ++j) {
-                            const int t = b * TB + tt;
-                            sum[r][t] = rq_dot8(a.v[tt * KA + j], cur[r].v[c * KA + j], sum[r][t]);
-                        }
+        for (int q = 0; q < NB; ++q) {
+            const int c = q / (T / TB), b = q % (T / TB);
+            const int qi = s * NB + q;
+            rq_words<TB * KA> a, a_nxt;
+            if (PF) {
+                a = a_cur;
+                sum[0][b * TB] = rq_dot8(a.v[0], cur[0].v[c * KA], sum[0][b * TB]);
                 rq_block_fence();
+                a_nxt = ap[qi + 1 < nblocks ? qi + 1 : qi]; // last block re-reads, no branch
+            } else {
+                a = ap[qi];
             }
+#pragma unroll
+            for (int tt = 0; tt < TB; ++tt)
+#pragma unroll
+                for (int r = 0; r < R; ++r)
+#pragma unroll
+                    for (int j = 0; j < KA; ++j) {
+                        if (PF && tt == 0 && r == 0 && j == 0) continue; // done above
+                        const int t = b * TB + tt;
+                        sum[r][t] = rq_dot8(a.v[tt * KA + j], cur[r].v[c * KA + j], sum[r][t]);
+                    }
+            rq_block_fence();
+            if (PF) a_cur = a_nxt;
+        }
 #pragma unroll
         for (int r = 0; r < R; ++r) cur[r] = nxt[r];
     }
 
-    // reduce the workgroup's K slices: waves 1..W-1 park their sums in LDS, wave 0 adds them
+    // reduce the workgroup's K slices in one LDS buffer: wave 0 stores its sums, the other
+    // waves add theirs atomically (ds_add_u32), wave 0 reads the total. One slice per wave
+    // instead would take (W-1)*R*T*256 B: 24 KB at T = 32, W = 4, two workgroups per CU.
     extern __shared__ int32_t rq_lds[];
     if (W > 1) {
+        if (wave == 0)
+#pragma unroll
+            for (int r = 0; r < R; ++r)
+#pragma unroll
+                for (int t = 0; t < T; ++t) rq_lds[(r * T + t) * RQ_WAVE + lane] = sum[r][t];
+        __syncthreads();
         if (wave > 0)
 #pragma unroll
             for (int r = 0; r < R; ++r)
 #pragma unroll
-                for (int t = 0; t < T; ++t) rq_lds[(((wave - 1) * R + r) * T + t) * RQ_WAVE + lane] = sum[r][t];
+                for (int t = 0; t < T; ++t) atomicAdd(&rq_lds[(r * T + t) * RQ_WAVE + lane], sum[r][t]);
         __syncthreads();
         if (wave == 0)
-            for (int v = 0; v < W - 1; ++v)
 #pragma unroll
-                for (int r = 0; r < R; ++r)
+            for (int r = 0; r < R; ++r)
 #pragma unroll
-                    for (int t = 0; t < T; ++t) sum[r][t] += rq_lds[((v * R + r) * T + t) * RQ_WAVE + lane];
+                for (int t = 0; t < T; ++t) sum[r][t] = rq_lds[(r * T + t) * RQ_WAVE + lane];
     }
     if (wave != 0) return;
 #pragma unroll

@@ -6,6 +6,10 @@ publish = false
 build = "build.rs"
 
 [dependencies]
+faer = "0.22"
+gemm = "0.18"
+memmap2 = "0.9"
+rayon = "1.12"
 
 [build-dependencies]
 bindgen = "0.72"
