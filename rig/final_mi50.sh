@@ -2,7 +2,9 @@
 # The final numbers of a W4A4 target with its DFlash2 drafter on box 1 (4x MI50 32 GB, ROCm 5.7) at one GPU, TP2 and
 # TP4, with the runtime settings that won (RESULTS.md):
 #   rig/final_mi50.sh MODEL DRAFTER            env BIN (default ~/mx-llama.cpp/build/bin), NMAX (draft length,
-#                                              default 7), SCORE=0 (skip the KLD runs, e.g. for a baseline model)
+#                                              default 7), SCORE=0 (skip the KLD runs, e.g. for a baseline model),
+#                                              DEVD (drafter placement under TP, default "-devd ROCm0"; DEVD= replicates
+#                                              it, which a drafter without its own lm_head needs, e.g. incoai's)
 # - llama-bench, 3 repetitions: prefill pp512 (ubatch 512) and pp2048 (ubatch 2048), plain decode tg128, and the
 #   8-token forward a verify step runs (pp8, also printed as ms).
 # - DFlash2 decoding: draft NMAX, rig/acc_prompts.json (30 prompts x 256 tokens, greedy), the drafter on GPU 0.
@@ -30,7 +32,7 @@ for g in 0 0,1 0,1,2,3; do
     devd=
     if [ $g != 0 ]; then
         sm="-sm tensor"
-        devd="-devd ROCm0"
+        devd=${DEVD--devd ROCm0}
     fi
     echo "== GPUs $g"
     HIP_VISIBLE_DEVICES=$g "$bin/llama-bench" -m "$model" -ngl 99 -fa 1 -lm dio $sm -p 512,8 -n 128 -r 3 -o jsonl 2>/dev/null | show

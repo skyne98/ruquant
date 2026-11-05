@@ -169,7 +169,8 @@ llama-server -m qwen3.8-27b-ost44-v2-wg64-rb4-gptq.gguf -md dflash2-ost44-h4-l4-
 - **Noise.** Box 1 drifts between sessions by up to ±3% on speculative runs. Only same-session pairs compare, and
   the final table is one session.
 - **Reproduce the final table:** `rig/final_mi50.sh MODEL DRAFTER` (W4A4), and
-  `NMAX=4 SCORE=0 rig/final_mi50.sh Qwen3.8-27B-Q4_0.gguf Qwen3.8-27B-DFlash2-Q8_0.gguf` (the baseline).
+  `NMAX=4 SCORE=0 DEVD= rig/final_mi50.sh Qwen3.8-27B-Q4_0.gguf Qwen3.8-27B-DFlash2-Q8_0.gguf` (the baseline;
+  its drafter can't be pinned under TP).
 
 ## Box 2 (2× MI50 16 GB, no peer access), 2026-11-04 build
 
