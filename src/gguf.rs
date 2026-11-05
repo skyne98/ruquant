@@ -42,6 +42,7 @@ pub struct Kv {
     pub raw: Vec<u8>, // value type (u32) + value, as stored
 }
 
+#[derive(Clone)]
 pub struct TensorInfo {
     pub name: String,
     pub dims: Vec<u64>, // ne0 first

@@ -25,6 +25,11 @@ student's layer inputs stay in host memory, the loss gives the gradient at the l
 is recomputed backwards from its saved input.
 
     .venv/bin/python accuracy/ostquant_qwen.py --out models/ost
+    .venv/bin/python accuracy/ostquant_qwen.py --repo Qwen/Qwen3.5-4B --out models/ost-4b   (the quality proxy)
+
+--group G (default 64): train against the runtime's activation quantizer, groups of G inputs per token with a zero
+point and an integer multiple (1..255) of the token's unit (0: per token, as OST44 was trained). --rot-opt sgd:
+Riemannian SGD on the Stiefel manifold (SpinQuant's choice) instead of RiemannianAdam, under which R barely moved.
 Writes OUT/r1.f32 (5120 x 5120 row-major, y = x R1) and OUT/blk.N.{s_in,s_post,s_ud,s_ov}.f32 for
 `ruquant convert --ost OUT`; OUT/scales.safetensors, OUT/opt.pt and OUT/log.json for --resume.
 """
@@ -63,6 +68,29 @@ def quant_ste(x, bits=4, clip=1.0):
     return (q - z) * scale
 
 
+def quant_ste_groups(x, g, clip=1.0):
+    """The runtime's activation quantizer (rq_quantize_row_a): per token the unit u = R / (15 * 255) from the
+    widest group range R; per group of g a zero point and the scale m u, m = ceil(range * 255 / R) in 1..255.
+    Straight-through rounding; the scale keeps its gradient through u (m is a constant per step)."""
+    shape = x.shape
+    x = x.float().reshape(*shape[:-1], -1, g)
+    lo = x.amin(-1, keepdim=True).clamp(max=0) * clip
+    hi = x.amax(-1, keepdim=True).clamp(min=0) * clip
+    rng = hi - lo
+    r = rng.amax(-2, keepdim=True).clamp_min(1e-8)
+    unit = r / (15 * 255)
+    m = torch.ceil(rng.detach() * 255 / r.detach()).clamp(1, 255)
+    scale = m * unit
+    z = torch.round(-lo / scale).detach().clamp(0, 15)
+    v = x / scale
+    q = torch.clamp(v + (torch.round(v) - v).detach() + z, 0, 15)
+    return ((q - z) * scale).reshape(shape)
+
+
+def quantize_input(x, clip, group):
+    return quant_ste_groups(x, group, clip) if group else quant_ste(x, 4, clip)
+
+
 def canonical_hadamard(n, dev):
     """ggml_rq_hadamard's H (Paley kron Sylvester / sqrt(n), no signs): the online rotation the runtime uses."""
     R = E.Rotation(n, 0, dev)
@@ -75,9 +103,9 @@ class QNorm(nn.Module):
     """RMSNorm (zero-centered weight w) whose output the W4A4 readers quantize: x_n -> x_n R / s -> Q -> * s R^T,
     then * (1 + w), so the original reader weights apply unchanged. The unquantized output is kept in .fp."""
 
-    def __init__(self, norm, R, s, clip):
+    def __init__(self, norm, R, s, clip, group):
         super().__init__()
-        self.w, self.eps, self.R, self.s, self.clip = norm.weight, norm.eps, R, s, clip
+        self.w, self.eps, self.R, self.s, self.clip, self.group = norm.weight, norm.eps, R, s, clip, group
         self.fp = None
 
     def forward(self, h):
@@ -86,7 +114,7 @@ class QNorm(nn.Module):
         w = 1.0 + self.w.float()
         self.fp = (x * w).to(h.dtype)
         a = (x @ self.R) / self.s
-        x = (quant_ste(a, 4, self.clip) * self.s) @ self.R.t()
+        x = (quantize_input(a, self.clip, self.group) * self.s) @ self.R.t()
         return (x * w).to(h.dtype)
 
 
@@ -104,26 +132,26 @@ class FpTap(nn.Module):
 class QIn(nn.Module):
     """A writer whose input gets smoothing s and the online Hadamard H before quantization."""
 
-    def __init__(self, lin, H, s, clip):
+    def __init__(self, lin, H, s, clip, group):
         super().__init__()
-        self.lin, self.H, self.s, self.clip = lin, H, s, clip
+        self.lin, self.H, self.s, self.clip, self.group = lin, H, s, clip, group
 
     def forward(self, x):
         dt = x.dtype
         b = self.H(x.float() / self.s)
-        x = self.H.inverse(quant_ste(b, 4, self.clip)) * self.s
+        x = self.H.inverse(quantize_input(b, self.clip, self.group)) * self.s
         return self.lin(x.to(dt))
 
 
-def wrap_layer(layer, params, i, Hs, clip, n_kv, groups):
+def wrap_layer(layer, params, i, Hs, clip, n_kv, groups, group):
     p = params[i]
-    qin = QNorm(layer.input_layernorm, params["R"], p["s_in"], clip)
+    qin = QNorm(layer.input_layernorm, params["R"], p["s_in"], clip, group)
     layer.input_layernorm = qin
-    layer.post_attention_layernorm = QNorm(layer.post_attention_layernorm, params["R"], p["s_post"], clip)
-    layer.mlp.down_proj = QIn(layer.mlp.down_proj, Hs[17408], p["s_ud"], clip)
+    layer.post_attention_layernorm = QNorm(layer.post_attention_layernorm, params["R"], p["s_post"], clip, group)
+    layer.mlp.down_proj = QIn(layer.mlp.down_proj, Hs["down"], p["s_ud"], clip, group)
     if hasattr(layer, "self_attn"):
         s_ov = p["s_ov"].view(n_kv, 1, -1).expand(n_kv, groups, -1).reshape(-1)  # o_proj input is per q head
-        layer.self_attn.o_proj = QIn(layer.self_attn.o_proj, Hs[6144], s_ov, clip)
+        layer.self_attn.o_proj = QIn(layer.self_attn.o_proj, Hs["o"], s_ov, clip, group)
     else:
         la = layer.linear_attn
         la.in_proj_a, la.in_proj_b = FpTap(la.in_proj_a, qin), FpTap(la.in_proj_b, qin)
@@ -197,7 +225,11 @@ def main():
     ap.add_argument("--layers", type=int, default=0, help="first N layers only (a smoke test)")
     ap.add_argument("--out", default="models/ost")
     ap.add_argument("--resume", action="store_true", help="continue from OUT")
+    ap.add_argument("--repo", default=E.REPO, help="HF checkpoint (Qwen/Qwen3.5-4B for the quality proxy)")
+    ap.add_argument("--group", type=int, default=64, help="activation group size of the quantizer (0: per token)")
+    ap.add_argument("--rot-opt", choices=["adam", "sgd"], default="adam")
     a = ap.parse_args()
+    global HIDDEN
 
     import geoopt
     from huggingface_hub import snapshot_download
@@ -210,13 +242,16 @@ def main():
     dev, L = "cuda", a.seqlen
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
+    E.REPO = a.repo
     path = snapshot_download(E.REPO, allow_patterns=["*.json", "*.safetensors", "*.txt", "*.jinja"])
     tcfg = Qwen3_5TextConfig(**json.loads((Path(path) / "config.json").read_text())["text_config"])
+    HIDDEN = E.HIDDEN = tcfg.hidden_size
     tcfg._attn_implementation = "sdpa"
     n_layers = a.layers or tcfg.num_hidden_layers
     n_kv, groups = tcfg.num_key_value_heads, tcfg.num_attention_heads // tcfg.num_key_value_heads
     tok = AutoTokenizer.from_pretrained(path)
     ck = E.Checkpoint(path)
+    E.PREFIX = "model.language_model." if any(k.startswith("model.language_model.") for k in ck.where) else "model."
     pf = Prefetch(ck)
 
     # training windows: random 2048-token windows of wikitext-2 train
@@ -251,21 +286,27 @@ def main():
             p[k] = nn.Parameter(sc.get(f"{i}.{k}", torch.ones(n, device=dev)).clone())
             smooth.append(p[k])
         params[i] = p
-    opt = geoopt.optim.RiemannianAdam([{"params": [params["R"]], "lr": a.rotate_lr},
-                                       {"params": smooth, "lr": a.smooth_lr}],
-                                      lr=a.rotate_lr, weight_decay=0, stabilize=10)
+    if a.rot_opt == "adam":
+        opt = geoopt.optim.RiemannianAdam([{"params": [params["R"]], "lr": a.rotate_lr},
+                                           {"params": smooth, "lr": a.smooth_lr}],
+                                          lr=a.rotate_lr, weight_decay=0, stabilize=10)
+    else:  # plain SGD steps for the scales too, at their own lr
+        opt = geoopt.optim.RiemannianSGD([{"params": [params["R"]], "lr": a.rotate_lr},
+                                          {"params": smooth, "lr": a.smooth_lr}],
+                                         lr=a.rotate_lr, momentum=0.9, stabilize=10)
     if a.resume and (out / "opt.pt").exists():
         opt.load_state_dict(torch.load(out / "opt.pt"))
     base_lr = [a.rotate_lr, a.smooth_lr]
 
-    Hs = {6144: canonical_hadamard(6144, dev), 17408: canonical_hadamard(17408, dev)}
+    Hs = {"o": canonical_hadamard(tcfg.num_attention_heads * tcfg.head_dim, dev),
+          "down": canonical_hadamard(tcfg.intermediate_size, dev)}
     rotary = M.Qwen3_5TextRotaryEmbedding(tcfg).to(dev)
     pe = rotary(torch.empty(1, device=dev, dtype=torch.bfloat16),
                 torch.arange(L, device=dev).view(1, 1, -1).expand(3, a.micro, -1))
     embed = ck.get(E.PREFIX + "embed_tokens.weight")  # stays in host memory
     norm_f = M.Qwen3_5RMSNorm(HIDDEN, eps=tcfg.rms_norm_eps).to(dev)
     norm_f.weight.data.copy_(ck.get(E.PREFIX + "norm.weight").to(dev))
-    lm = ck.get("lm_head.weight").to(dev)
+    lm = (ck.get("lm_head.weight") if "lm_head.weight" in ck.where else embed).to(dev)  # tied in the small models
 
     def layer_fp(i, nxt):
         if 0 <= nxt < n_layers:
@@ -292,7 +333,7 @@ def main():
             for i in range(n_layers):
                 layer = layer_fp(i, i + 1)
                 ht = run_layer(layer, ht)
-                wrap_layer(layer, params, i, Hs, a.clip, n_kv, groups)
+                wrap_layer(layer, params, i, Hs, a.clip, n_kv, groups, a.group)
                 saved.append(hs)
                 hs = run_layer(layer, hs)
                 del layer
@@ -314,7 +355,7 @@ def main():
         del hs_g
         # backward, layer by layer, recomputing each layer from its saved input
         for i in reversed(range(n_layers)):
-            layer = wrap_layer(layer_fp(i, i - 1), params, i, Hs, a.clip, n_kv, groups)
+            layer = wrap_layer(layer_fp(i, i - 1), params, i, Hs, a.clip, n_kv, groups, a.group)
             gin = []
             for s in range(0, a.batch, a.micro):
                 x = saved[i][s:s + a.micro].to(dev).requires_grad_(True)

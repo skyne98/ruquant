@@ -4,6 +4,13 @@ Quantization research on ggml kernels. Rust host on our llama.cpp fork: W4A4 (in
 activations) as ggml tensor types with CPU and CUDA kernels, a converter that turns a GGUF into a
 rotated W4A4 GGUF, and our own CUDA kernels running as nodes inside ggml-cuda's captured CUDA graph.
 
+**Results:** [RESULTS.md](RESULTS.md) has the final numbers and the exact model recipe, runtime and methodology.
+Qwen3.8-27B in pure W4A4 with DFlash2 speculative decoding on AMD MI50s, published at
+[raspbfox/Qwen3.8-27B-W4A4-GGUF](https://huggingface.co/raspbfox/Qwen3.8-27B-W4A4-GGUF). It runs on the mx-llama.cpp
+fork at [skyne98/mx-llama.cpp](https://github.com/skyne98/mx-llama.cpp/tree/ruquant), which is
+`patches/mx-llama.cpp-ruquant.patch` on c4d12e2. The long logs are [REPORT-2026-11-02.md](REPORT-2026-11-02.md)
+(speed, tensor parallelism) and [REPORT-2026-11-03-quality.md](REPORT-2026-11-03-quality.md) (quality).
+
 ## Use it
 
 ```sh

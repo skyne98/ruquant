@@ -6,9 +6,11 @@
 // several back to back (one per weight copy, at least 8 when they fit), the way a forward pass
 // runs them: it includes ggml quantizing the activations to q8_1 for each mul_mat, and
 // amortizes the graph launch and sync. "us_alone" is a graph of one mul_mat, synchronized.
-//   ./ggml_bench [gpu index] [--quick] [--types w4a4,q4_0] [--lm q6_K,q8_0] [--widths 1,5,8]   -> JSON on stdout
+//   ./ggml_bench [gpu index] [--quick] [--types w4a4,q4_0] [--lm q6_K,q8_0] [--widths 1,5,8] [--tp N]   -> JSON on stdout
 // --types replaces the 27b linears' type (w4a4 turns into w4a4h for the shapes that read an online Hadamard
 // input: attn.o / dn.out, mlp.down), --lm the lm_head's; the fn and drafter shapes are skipped with --types.
+// --tp N times one GPU's share under N-way tensor parallelism: K / N for the row-parallel shapes (.o, down), N / N
+// for the rest.
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml.h"
@@ -32,6 +34,7 @@ static const Shape SHAPES[] = {
     {"27b attn.q+gate", 5120, 12288, GGML_TYPE_Q4_0}, {"27b attn.k/v", 5120, 1024, GGML_TYPE_Q4_0},
     {"27b attn.o / dn.out", 6144, 5120, GGML_TYPE_Q4_0}, {"27b dn.qkvz", 5120, 16384, GGML_TYPE_Q4_0},
     {"27b mlp.gate/up", 5120, 17408, GGML_TYPE_Q4_0}, {"27b mlp.down", 17408, 5120, GGML_TYPE_Q4_0},
+    {"27b mlp.gate+up", 5120, 34816, GGML_TYPE_Q4_0}, // the two in one launch (ggml-cuda's W4A4 fusion)
     {"27b drafter q", 5120, 4096, GGML_TYPE_Q4_0}, {"27b drafter o", 4096, 5120, GGML_TYPE_Q4_0},
     {"27b drafter fc", 25600, 5120, GGML_TYPE_Q4_0}, {"fn qsa.q+gate", 2560, 12288, GGML_TYPE_Q4_0},
     {"fn dn.qkvz", 2560, 16384, GGML_TYPE_Q4_0}, {"fn qsa.o / dn.out", 6144, 2560, GGML_TYPE_Q4_0},
@@ -136,7 +139,9 @@ int main(int argc, char** argv) {
     bool quick = false;
     std::vector<std::string> types, lm;
     std::vector<int> widths(std::begin(WIDTHS), std::end(WIDTHS));
+    int tp = 1;
     for (int i = 1; i < argc; ++i) {
+        if (i + 1 < argc && std::strcmp(argv[i], "--tp") == 0) tp = std::atoi(argv[i + 1]);
         quick |= std::strcmp(argv[i], "--quick") == 0;
         if (i + 1 < argc && std::strcmp(argv[i], "--types") == 0) types = split(argv[i + 1]);
         if (i + 1 < argc && std::strcmp(argv[i], "--lm") == 0) lm = split(argv[i + 1]);
@@ -179,7 +184,8 @@ int main(int argc, char** argv) {
             run.push_back(v);
         }
     }
-    for (const Shape& s : run) {
+    for (Shape& s : run) {
+        if (std::strstr(s.name, ".o") || std::strstr(s.name, "down")) s.K /= tp; else s.N /= tp;
         const std::vector<uint8_t> q = weights(s, rng);
         for (int T : widths) {
             if (quick && T != 1 && T != 8 && T != 32) continue;

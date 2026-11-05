@@ -84,13 +84,26 @@ def sylvester(m):
 FACTORS = {5120: (20, 19, 256), 6144: (12, 11, 512), 17408: (68, 67, 256)}  # n: (paley order, q, 2^k)
 
 
+def factor(n):
+    """ggml_rq_hadamard_factor: the smallest Paley order p (1, or q + 1 with q prime, q = 3 mod 4) with n / p a
+    power of 2, as (p, q, 2^k)."""
+    for p in range(1, 129):
+        if p > 1:
+            q = p - 1
+            if p % 4 or q % 4 != 3 or any(q % d == 0 for d in range(2, int(q**0.5) + 1)):
+                continue
+        if n % p == 0 and (n // p) & (n // p - 1) == 0:
+            return p, p - 1, n // p
+    raise ValueError(f"no Paley x Sylvester factorization of {n}")
+
+
 class Rotation:
     """x -> x @ H for row vectors, H = diag(signs) (H_p kron H_m) / sqrt(n): orthogonal."""
 
     def __init__(self, n, seed, device):
-        p, q, m = FACTORS[n]
+        p, q, m = FACTORS[n] if n in FACTORS else factor(n)
         self.p, self.m, self.n = p, m, n
-        self.A, self.B = paley(q).to(device), sylvester(m).to(device)
+        self.A, self.B = (paley(q) if p > 1 else torch.ones(1, 1)).to(device), sylvester(m).to(device)
         g = torch.Generator().manual_seed(seed)
         self.signs = (torch.randint(0, 2, (n,), generator=g) * 2 - 1).float().to(device)
 
@@ -181,6 +194,85 @@ def gptq_int4(W, H, block=128, damp=0.01, group=0):
             Err[:, i] = e
         W[:, i2:] -= Err @ Hinv[i1:i2, i2:]
     return Q[:, torch.argsort(perm)]
+
+
+def gptq_static(W, H, S, block=128, damp=0.01):
+    """GPTQ onto codes in [-8, 7] times a fixed scale per weight (S, same shape as W: per row, or per row
+    per group set before GPTQ, GPTQ's static groups), act order. Returns the codes."""
+    W = W.float().clone()
+    H = H.clone()
+    n = W.shape[1]
+    dead = torch.diag(H) == 0
+    H[dead, dead] = 1
+    W[:, dead] = 0
+    perm = torch.argsort(torch.diag(H), descending=True)
+    W, H, S = W[:, perm], H[perm][:, perm], S[:, perm]
+    H += damp * torch.mean(torch.diag(H)) * torch.eye(n, device=H.device)
+    Hinv = torch.linalg.cholesky(torch.cholesky_inverse(torch.linalg.cholesky(H)), upper=True)
+    C = torch.zeros_like(W)
+    for i1 in range(0, n, block):
+        i2 = min(i1 + block, n)
+        W1, Hi = W[:, i1:i2].clone(), Hinv[i1:i2, i1:i2]
+        Err = torch.zeros_like(W1)
+        for i in range(i2 - i1):
+            w, s = W1[:, i], S[:, i1 + i]
+            c = torch.clamp(torch.round(w / s), -8, 7)
+            C[:, i1 + i] = c
+            e = (w - c * s) / Hi[i, i]
+            W1[:, i:] -= e[:, None] * Hi[i, i:][None, :]
+            Err[:, i] = e
+        W[:, i2:] -= Err @ Hinv[i1:i2, i2:]
+    return C[:, torch.argsort(perm)]
+
+
+def int_multipliers(s, kmax=15):
+    """Group scales s (rows x groups) as integer multiples k of a row unit v = max(s) / kmax: the kernel
+    folds sum_g k_g * acc_g exactly in int32. Returns the effective scales k * v."""
+    v = s.amax(1, keepdim=True).clamp_min(1e-12) / kmax
+    return torch.clamp(torch.round(s / v), 1, kmax) * v
+
+
+def refit_scales(W, H, C, G, damp=0.01):
+    """Learned scales: given the codes C, the per-row (G = 0) or per-row per-group scales minimizing the
+    layer's output error (W - S C) H (W - S C)^T, row by row: least squares, closed form."""
+    W, C = W.float(), C.float()
+    n, K = W.shape
+    H = H.clone()
+    dead = torch.diag(H) == 0
+    H[dead, dead] = 1
+    H += damp * torch.mean(torch.diag(H)) * torch.eye(K, device=H.device)
+    if not G:
+        CH = C @ H
+        return ((CH * W).sum(1) / (CH * C).sum(1).clamp_min(1e-12))[:, None]
+    ng = K // G
+    b = (C * (W @ H)).reshape(n, ng, G).sum(-1)
+    A = torch.empty(n, ng, ng, device=W.device)
+    for h in range(ng):
+        P = C[:, h * G:(h + 1) * G] @ H[h * G:(h + 1) * G, :]
+        A[:, :, h] = (C * P).reshape(n, ng, G).sum(-1)
+    A += 1e-6 * A.diagonal(dim1=1, dim2=2).mean(-1)[:, None, None] * torch.eye(ng, device=W.device)
+    return torch.linalg.solve(A, b[..., None])[..., 0]
+
+
+def quant_weights(W, H, wg, refit):
+    """The recipes' weight grids: wg = 0 one scale per row (the W4A4 type), wg = G a scale per row per G inputs
+    as an integer multiple (1..15) of the row's unit; refit rounds of learned (least-squares) scales, each
+    followed by GPTQ again on the new scales. Returns the dequantized weights."""
+    n, K = W.shape
+    Wf = W.float()
+    if wg:
+        s = int4_scale(Wf.reshape(-1, wg)).reshape(n, K // wg)
+        s = int_multipliers(s)
+    else:
+        s = int4_scale(Wf)
+    expand = lambda s: s.repeat_interleave(wg, 1) if wg else s.expand(n, K)
+    C = gptq_static(Wf, H, expand(s))
+    for _ in range(refit):
+        s = refit_scales(Wf, H, C, wg).clamp_min(1e-12)
+        if wg:
+            s = int_multipliers(s)
+        C = gptq_static(Wf, H, expand(s))
+    return C * expand(s)
 
 
 class QLinear(nn.Module):
@@ -539,6 +631,8 @@ class Recipe:
     clip4: float = 0.8
     clip8: float = 1.0
     agroup: int = 0   # activation scale group (0 = per token)
+    wgi: int = 0      # weight scale group as integer multipliers of a row unit, act order (quant_weights)
+    refit: int = 0    # rounds of learned (least-squares) weight scales
 
 
 # all W4A4 on dot8; groups cost one convert + one fma per group per output per token (g128: 1/8 of the
@@ -549,6 +643,15 @@ RECIPES = {r.name: r for r in [
     Recipe("ag256", 0, 4, 4, clip4=0.9, agroup=256),
     Recipe("g256", 256, 4, 4, clip4=0.9, agroup=256),
     Recipe("g128", 128, 4, 4, clip4=0.9, agroup=128),
+    # 2026-11-02: act groups as the kernel now runs them, sizes, and learned / grouped weight scales
+    Recipe("a256", 0, 4, 4, clip4=0.9, agroup=256),
+    Recipe("a128", 0, 4, 4, clip4=0.9, agroup=128),
+    Recipe("a64", 0, 4, 4, clip4=0.9, agroup=64),
+    Recipe("a256-ls", 0, 4, 4, clip4=0.9, agroup=256, refit=1),
+    Recipe("a256-ls2", 0, 4, 4, clip4=0.9, agroup=256, refit=2),
+    Recipe("a256-w256", 0, 4, 4, clip4=0.9, agroup=256, wgi=256),
+    Recipe("a256-w256-ls", 0, 4, 4, clip4=0.9, agroup=256, wgi=256, refit=1),
+    Recipe("a128-w128", 0, 4, 4, clip4=0.9, agroup=128, wgi=128),
 ]}
 
 
@@ -572,7 +675,7 @@ def run_recipes(a):
     ids = torch.from_numpy(np.array(ref.tokens[: a.seqs])).long()
     nseq, L, B = ids.shape[0], ids.shape[1], a.batch
     recipes = [RECIPES[r] for r in (a.recipes or list(RECIPES))]
-    groups = sorted({r.group for r in recipes})
+    grids = sorted({(r.group, r.wgi, r.refit) for r in recipes})
     cids = calib_tokens(tok, a.calib_seqs, L)
     print(f"{a.ref}: {nseq} x {L} eval, {cids.shape[0]} x {L} calibration; recipes "
           f"{', '.join(r.name for r in recipes)}", flush=True)
@@ -611,13 +714,14 @@ def run_recipes(a):
         for m in qlinears(fp).values():
             m.H = torch.zeros(m.weight.shape[1], m.weight.shape[1], device=dev)
         forward_all(fp, calib)  # Hessians, and the next layer's calibration inputs
-        quant = {g: {n: gptq_int4(m.weight.data, m.H, group=g).to(torch.bfloat16) for n, m in qlinears(fp).items()}
-                 for g in groups}
+        quant = {g: {n: (gptq_int4(m.weight.data, m.H, group=g[0]) if g[0] else
+                         quant_weights(m.weight.data, m.H, g[1], g[2])).to(torch.bfloat16)
+                     for n, m in qlinears(fp).items()} for g in grids}
         del fp
         for r in recipes:
             layer = build_layer(M, tcfg, i, sd, True, Rin)
             for n, m in qlinears(layer).items():
-                m.weight.data = quant[r.group][n]
+                m.weight.data = quant[(r.group, r.wgi, r.refit)][n]
                 write = any(n.endswith(w) for w in WRITE)
                 m.abits = r.abits_write if write else r.abits_read
                 m.clip = r.clip4 if m.abits == 4 else r.clip8

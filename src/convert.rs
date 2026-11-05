@@ -90,6 +90,43 @@ fn hadamard(x: &mut [f32]) {
     unsafe { ggml_rq_hadamard(x.as_mut_ptr(), x.len() as i64, false) }
 }
 
+/// x <- x diag(H_n, H_n, ...): the online rotation of a W4A4H row in blocks of n (n = the row length: one H)
+fn hadamard_blocks(x: &mut [f32], n: usize) {
+    x.chunks_mut(n).for_each(hadamard);
+}
+
+/// The Hadamard length a W4A4H tensor's kernels read, in every block header (pad[0], bytes 8..12 of 144)
+fn set_rot_len(data: &mut [u8], n: usize) {
+    data.chunks_exact_mut(144).for_each(|b| b[8..12].copy_from_slice(&(n as i32).to_le_bytes()));
+}
+
+/// A Hessian of x H (ruquant hessian rotates W4A4H inputs by the whole-row H) in the basis of the block rotation
+/// x diag(H_n, ...): B^T S B with B = H^T diag(H_n, ...), as rows of S B, a transpose, and rows again (S symmetric).
+fn rebase_hessian(h: &[f32], k: usize, n: usize) -> Vec<f32> {
+    let rows = |m: &mut [f32]| {
+        m.par_chunks_mut(k).for_each(|r| {
+            unsafe { ggml_rq_hadamard(r.as_mut_ptr(), k as i64, true) };
+            hadamard_blocks(r, n);
+        })
+    };
+    let mut t = h.to_vec();
+    rows(&mut t);
+    let mut u = vec![0f32; k * k];
+    u.par_chunks_mut(k).enumerate().for_each(|(j, col)| col.iter_mut().enumerate().for_each(|(i, v)| *v = t[i * k + j]));
+    rows(&mut u);
+    u
+}
+
+/// --rot-blocks: W4A4H rows rotated in `blocks` Hadamard blocks of k / blocks, so a tensor-parallel split of K
+/// (-sm tensor, up to `blocks` ways) keeps whole blocks on each device
+fn rot_len(k: usize, blocks: usize, name: &str) -> Result<usize, String> {
+    let n = k / blocks;
+    if k % blocks != 0 || n % 256 != 0 {
+        return Err(format!("{name}: {k} inputs don't split into {blocks} Hadamard blocks of whole 256-blocks"));
+    }
+    Ok(n)
+}
+
 /// Every row of `t` as f32, through ggml's own dequantizer for its type.
 fn dequantize(g: &Gguf, t: &TensorInfo) -> Result<Vec<f32>, String> {
     let k = t.dims[0] as usize;
@@ -132,6 +169,9 @@ pub fn main(args: &[String]) -> Result<(), String> {
     let mut rotate = true;
     let mut keep: Vec<String> = Vec::new();
     let mut hdir: Option<String> = None;
+    let mut refit = 0usize; // --refit: rounds of learned GPTQ scales
+    let mut wgroups = 0usize; // --wgroups [64]: GPTQ with a scale multiplier per block of 256 (or per 64 inputs)
+    let mut rot_blocks = 1usize; // --rot-blocks: block-diagonal online Hadamard on the W4A4H tensors
     let mut klt = false;
     let mut r1_file: Option<String> = None;
     let mut types_from: Option<String> = None;
@@ -160,6 +200,15 @@ pub fn main(args: &[String]) -> Result<(), String> {
                 sets.push((name.to_string(), ty));
             }
             "--hessians" => hdir = Some(it.next().ok_or("--hessians needs a directory")?.clone()),
+            "--refit" => refit = it.next().and_then(|v| v.parse().ok()).ok_or("--refit needs a count")?,
+            "--wgroups" => {
+                wgroups = 256;
+                if it.clone().next().is_some_and(|v| v == "64") {
+                    it.next();
+                    wgroups = 64;
+                }
+            }
+            "--rot-blocks" => rot_blocks = it.next().and_then(|v| v.parse().ok()).filter(|&b| b >= 1).ok_or("--rot-blocks needs a count")?,
             "--r1-file" => r1_file = Some(it.next().ok_or("--r1-file needs a path")?.clone()),
             "--types-from" => types_from = Some(it.next().ok_or("--types-from needs a GGUF")?.clone()),
             "--ost" => {
@@ -191,7 +240,12 @@ pub fn main(args: &[String]) -> Result<(), String> {
                     --types-from: another quant of the same model (e.g. unsloth's Q4_0) picks the types: its 4-bit linears\n  \
                     (q4_0, q4_1) become W4A4 / W4A4H, everything else gets that file's type, re-quantized from IN after rotation\n  \
                     --keep: linear tensors whose name contains one of these stay Q8_0 (still rotated), e.g. ffn_down,blk.0.\n  \
-                    --hessians: GPTQ instead of rounding wherever DIR (from ruquant hessian) has the input's Hessian".into());
+                    --hessians: GPTQ instead of rounding wherever DIR (from ruquant hessian) has the input's Hessian\n  \
+                    --refit N: GPTQ with learned scales, N rounds of a least-squares scale refit + GPTQ again\n  \
+                    --wgroups [64]: GPTQ with a scale per 256 inputs (or per 64: needs activation groups of 64), an\n  \
+                    integer multiple (1..15) of the row's unit\n  \
+                    --rot-blocks B: W4A4H inputs rotated in B Hadamard blocks, not one, so -sm tensor up to B ways can split\n  \
+                    them (the Hessians are rebased exactly)".into());
     };
     let t0 = Instant::now();
     let g = Gguf::open(input)?;
@@ -258,16 +312,29 @@ pub fn main(args: &[String]) -> Result<(), String> {
         });
     };
 
+    // Tied embeddings (the small Qwen3.5s): the head reads the final norm's output, whose scale has to go into the
+    // head's rows, so the shared matrix is untied: output.weight = E diag(output_norm) R1 from token_embd's data,
+    // Q8_0 unless --set names a type. llama.cpp uses output.weight whenever the file has one.
+    let mut src: Vec<TensorInfo> = g.tensors.clone();
+    let untie = g.tensor("output.weight").is_none() && rotate;
+    if untie {
+        let e = g.tensor("token_embd.weight").ok_or("no token_embd.weight")?;
+        src.push(TensorInfo { name: "output.weight".into(), dims: e.dims.clone(), ty: e.ty, offset: e.offset });
+    }
     // output layout: same tensors, same order, new types
     let map = match &types_from {
         Some(p) => Some(Gguf::open(p)?),
         None => None,
     };
     let mut infos = Vec::new();
-    for t in &g.tensors {
+    for t in &src {
         let kept = keep.iter().any(|k| t.name.contains(k.as_str()));
-        let mapped = map.as_ref().map(|m| m.tensor(&t.name).map(|mt| mt.ty).ok_or(format!("{}: not in --types-from", t.name)));
-        let mapped = mapped.transpose()?;
+        let synthetic = untie && t.name == "output.weight";
+        let mapped = map
+            .as_ref()
+            .filter(|_| !synthetic)
+            .map(|m| m.tensor(&t.name).map(|mt| mt.ty).ok_or(format!("{}: not in --types-from", t.name)));
+        let mapped = mapped.transpose()?.or(if synthetic { Some(gguf::Q8_0) } else { None });
         let four_bit = matches!(mapped, Some(2 | 3)); // q4_0, q4_1
         let linear = matches!(role(&t.name, n_main), Role::ReadIn(_) | Role::ReadPost(_) | Role::Write(_));
         // NAME is a whole tensor name (output.weight) or a layer tensor's base name (ssm_out)
@@ -300,7 +367,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
         "ruquant.w4a4",
         &if rotate {
             format!(
-                "R1 = {}; online H on attn_output, ssm_out, ffn_down; kept Q8_0: {keep:?}; GPTQ: {}",
+                "R1 = {}; online H ({rot_blocks} block(s) per row) on attn_output, ssm_out, ffn_down; kept Q8_0: {keep:?}; GPTQ: {}",
                 match &r1_file {
                     Some(f) => format!("dense from {f}{}", if ost.is_some() { ", OSTQuant smoothing" } else { "" }),
                     None => format!("{}diag(splitmix64 signs, seed {seed}) H_{n_embd}", if klt { "V_klt " } else { "" }),
@@ -314,7 +381,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
     let mut w = Writer::create(output, &kvs, &infos, g.alignment())?;
 
     let (mut in_bytes, mut out_bytes) = (0usize, 0usize);
-    for (t, info) in g.tensors.iter().zip(&infos) {
+    for (t, info) in src.iter().zip(&infos) {
         let role = role(&t.name, n_main);
         let base = t.name.split('.').nth(2).unwrap_or("");
         let k = t.dims[0] as usize;
@@ -397,21 +464,50 @@ pub fn main(args: &[String]) -> Result<(), String> {
                     _ => {}
                 }
                 let hess = hdir.as_deref().and_then(|d| hessian_path(d, &t.name, role));
-                match hess {
+                let rot = if info.ty == gguf::W4A4H { rot_len(k, rot_blocks, &t.name)? } else { k };
+                let mut q = match hess {
                     Some(path) if info.ty == gguf::W4A4 || info.ty == gguf::W4A4H => {
                         if info.ty == gguf::W4A4H {
-                            x.par_chunks_mut(k).for_each(hadamard); // the stored rows are W H
+                            x.par_chunks_mut(k).for_each(|r| hadamard_blocks(r, rot)); // the stored rows are W H
                         }
                         let raw = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
                         if raw.len() != k * k * 4 {
                             return Err(format!("{path}: {} bytes, expected a {k} x {k} f32 Hessian", raw.len()));
                         }
-                        let h: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
-                        let (codes, scales) = gptq::gptq(&x, &h, k).map_err(|e| format!("{}: {e}", t.name))?;
-                        gptq::pack(&codes, &scales, k)
+                        let mut h: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+                        if info.ty == gguf::W4A4H && rot != k {
+                            h = rebase_hessian(&h, k, rot);
+                        }
+                        // GPTAQ: with the FP cross term (ruquant hessian --fp) next to H, fit W C H^-1 first
+                        let cpath = path.replace(".f32", ".c.f32");
+                        if std::path::Path::new(&cpath).exists() {
+                            let raw = std::fs::read(&cpath).map_err(|e| format!("{cpath}: {e}"))?;
+                            let mut c: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+                            if info.ty == gguf::W4A4H && rot != k {
+                                // rebase_hessian(A) is B^T A^T B: transposed in, so C comes out as B^T C B
+                                let ct: Vec<f32> = (0..k * k).into_par_iter().map(|x| c[(x % k) * k + x / k]).collect();
+                                c = rebase_hessian(&ct, k, rot);
+                            }
+                            gptq::gptaq_shift(&mut x, &h, &c, k).map_err(|e| format!("{}: {e}", t.name))?;
+                        }
+                        if wgroups > 0 {
+                            let (codes, units, mults) = gptq::gptq_groups(&x, &h, k, wgroups).map_err(|e| format!("{}: {e}", t.name))?;
+                            gptq::pack_groups(&codes, &units, &mults, k)
+                        } else {
+                            let (codes, scales) = gptq::gptq_learned(&x, &h, k, refit).map_err(|e| format!("{}: {e}", t.name))?;
+                            gptq::pack(&codes, &scales, k)
+                        }
+                    }
+                    _ if info.ty == gguf::W4A4H && rot != k => {
+                        x.par_chunks_mut(k).for_each(|r| hadamard_blocks(r, rot));
+                        quantize(&x, k, gguf::W4A4) // same blocks; the rotation is ours
                     }
                     _ => quantize(&x, k, info.ty),
+                };
+                if info.ty == gguf::W4A4H {
+                    set_rot_len(&mut q, rot);
                 }
+                q
             }
         };
         if data.len() != info.n_bytes()? {
@@ -514,11 +610,19 @@ pub fn drafter_main(args: &[String]) -> Result<(), String> {
     let mut ost: Option<String> = None;
     let mut head_w4a4h = false;
     let mut lin_w4a4h = false;
+    let mut fc_w4a4 = false;
+    let mut rot_blocks = 1usize;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--seed" => seed = it.next().and_then(|s| s.parse().ok()).ok_or("--seed needs a number")?,
             "--ost" => ost = Some(it.next().ok_or("--ost needs a directory")?.clone()),
+            "--rot-blocks" => rot_blocks = it.next().and_then(|v| v.parse().ok()).filter(|&b| b >= 1).ok_or("--rot-blocks needs a count")?,
+            "--fc" => match it.next().map(String::as_str) {
+                Some("w4a4") => fc_w4a4 = true,
+                Some("keep") => fc_w4a4 = false,
+                _ => return Err("--fc is w4a4 or keep".into()),
+            },
             "--linears" => match it.next().map(String::as_str) {
                 Some("w4a4h") => lin_w4a4h = true,
                 Some("keep") => lin_w4a4h = false,
@@ -535,7 +639,10 @@ pub fn drafter_main(args: &[String]) -> Result<(), String> {
     let [draft, src, output] = &pos[..] else {
         return Err("usage: ruquant drafter DRAFT.gguf TARGET_SRC.gguf OUT.gguf [--ost DIR | --seed N] [--head w4a4h]\n  \
                     --head w4a4h: the drafter's own lm_head as W4A4H (online Hadamard on its unrotated input)\n  \
-                    --linears w4a4h: the drafter layers' linears as W4A4H too".into());
+                    --linears w4a4h: the drafter layers' linears as W4A4H too\n  \
+                    --rot-blocks B: attn_output / ffn_down rotated in B Hadamard blocks (-sm tensor up to B ways)\n  \
+                    --fc w4a4: fc as W4A4, no online Hadamard (its 25600-wide input does not factor; the input is the
+                    target's rotated residual stream)".into());
     };
     let t0 = Instant::now();
     let g = Gguf::open(draft)?;
@@ -591,7 +698,16 @@ pub fn drafter_main(args: &[String]) -> Result<(), String> {
     let mut infos: Vec<TensorInfo> = g
         .tensors
         .iter()
-        .map(|t| TensorInfo { name: t.name.clone(), dims: t.dims.clone(), ty: if lin(t) { gguf::W4A4H } else { t.ty }, offset: 0 })
+        .map(|t| {
+            let ty = if lin(t) {
+                gguf::W4A4H
+            } else if t.name == "fc.weight" && fc_w4a4 {
+                gguf::W4A4
+            } else {
+                t.ty
+            };
+            TensorInfo { name: t.name.clone(), dims: t.dims.clone(), ty, offset: 0 }
+        })
         .collect();
     let mut extra = Vec::new();
     for name in ["token_embd.weight", "output.weight"] {
@@ -618,10 +734,23 @@ pub fn drafter_main(args: &[String]) -> Result<(), String> {
             }
             let mut x = dequantize(&g, t)?;
             r1(&mut x); // every row is k / n_embd chunks of n_embd, each a target hidden state
-            w.tensor(&quantize(&x, k, t.ty))?;
+            w.tensor(&quantize(&x, k, if fc_w4a4 { gguf::W4A4 } else { t.ty }))?;
             println!("  fc.weight {:?}: {} chunks x R1  {:.1} s", t.dims, k / n_embd, t0.elapsed().as_secs_f32());
         } else if lin(t) {
-            w.tensor(&quantize(&dequantize(&g, t)?, t.dims[0] as usize, gguf::W4A4H))?;
+            let k = t.dims[0] as usize;
+            let base = t.name.split('.').nth(2).unwrap_or("");
+            // the row-parallel ones under -sm tensor (split along K) get the block rotation of --rot-blocks
+            let rot = if matches!(base, "attn_output" | "ffn_down") { rot_len(k, rot_blocks, &t.name)? } else { k };
+            let mut x = dequantize(&g, t)?;
+            let q = if rot == k {
+                quantize(&x, k, gguf::W4A4H)
+            } else {
+                x.par_chunks_mut(k).for_each(|r| hadamard_blocks(r, rot));
+                let mut q = quantize(&x, k, gguf::W4A4);
+                set_rot_len(&mut q, rot);
+                q
+            };
+            w.tensor(&q)?;
         } else {
             w.tensor(g.data(t)?)?;
         }
@@ -752,5 +881,140 @@ pub fn setclip_main(args: &[String]) -> Result<(), String> {
     }
     map.flush().map_err(|e| format!("{path}: {e}"))?;
     println!("{path}: activation clip {c} on W4A4, {ch} on W4A4H ({} tensors)", n4 + n4h);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // X^T X of rotated rows, the way ruquant hessian accumulates it
+    fn gram(x: &[f32], k: usize) -> Vec<f64> {
+        let mut h = vec![0f64; k * k];
+        for r in x.chunks(k) {
+            for i in 0..k {
+                for j in 0..k {
+                    h[i * k + j] += r[i] as f64 * r[j] as f64;
+                }
+            }
+        }
+        h
+    }
+
+    #[test]
+    fn rebased_hessian_is_the_block_rotations() {
+        let (k, n, m) = (1536, 768, 40); // 1536 = 12 x 128, 768 = 12 x 64
+        let mut s = 7u64;
+        let x: Vec<f32> = (0..m * k)
+            .map(|_| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((s >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * if (s >> 20) % 97 == 0 { 30.0 } else { 1.0 }
+            })
+            .collect();
+        let mut full = x.clone();
+        full.chunks_mut(k).for_each(hadamard);
+        let mut blk = x.clone();
+        blk.chunks_mut(k).for_each(|r| hadamard_blocks(r, n));
+        let h_full: Vec<f32> = gram(&full, k).iter().map(|&v| v as f32).collect();
+        let want = gram(&blk, k);
+        let got = rebase_hessian(&h_full, k, n);
+        let scale = want.iter().fold(0f64, |a, &v| a.max(v.abs()));
+        let err = got.iter().zip(&want).fold(0f64, |a, (&g, &w)| a.max((g as f64 - w).abs()));
+        assert!(err < 1e-5 * scale, "max error {err} of {scale}");
+    }
+}
+
+/// `ruquant a16 IN.gguf OUT.gguf [--only NAME,...] [--type f16|q8_0]`: the W4A4 / W4A4H tensors (those whose name
+/// contains one of --only, default all) dequantized as they are, the online Hadamard undone, and stored in a plain
+/// type, so they run with unquantized activations: the model's own int4 weights at A16. An ablation for how much of
+/// the error is activation quantization.
+pub fn a16_main(args: &[String]) -> Result<(), String> {
+    let mut pos = Vec::new();
+    let mut only: Vec<String> = Vec::new();
+    let mut ty = gguf::F16;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--only" => only.extend(it.next().ok_or("--only needs a comma list")?.split(',').filter(|s| !s.is_empty()).map(String::from)),
+            "--type" => match it.next().map(String::as_str) {
+                Some("f16") => ty = gguf::F16,
+                Some("q8_0") => ty = gguf::Q8_0,
+                _ => return Err("--type is f16 or q8_0".into()),
+            },
+            _ => pos.push(a.clone()),
+        }
+    }
+    let [input, output] = &pos[..] else {
+        return Err("usage: ruquant a16 IN.gguf OUT.gguf [--only NAME,...] [--type f16|q8_0]".into());
+    };
+    let t0 = Instant::now();
+    let g = Gguf::open(input)?;
+    let pick = |t: &TensorInfo| (t.ty == gguf::W4A4 || t.ty == gguf::W4A4H) && (only.is_empty() || only.iter().any(|o| t.name.contains(o.as_str())));
+    let infos: Vec<TensorInfo> = g
+        .tensors
+        .iter()
+        .map(|t| TensorInfo { name: t.name.clone(), dims: t.dims.clone(), ty: if pick(t) { ty } else { t.ty }, offset: 0 })
+        .collect();
+    let kvs: Vec<gguf::Kv> = g.kvs.iter().map(|k| gguf::Kv { key: k.key.clone(), raw: k.raw.clone() }).collect();
+    let mut w = Writer::create(output, &kvs, &infos, g.alignment())?;
+    let mut n = 0;
+    for t in &g.tensors {
+        if !pick(t) {
+            w.tensor(g.data(t)?)?;
+            continue;
+        }
+        let x = dequantize(&g, t)?; // W4A4H: back in the unrotated basis
+        w.tensor(&quantize(&x, t.dims[0] as usize, ty))?;
+        n += 1;
+    }
+    w.finish()?;
+    println!("{output}: {n} tensors at A16 ({}) in {:.0} s", type_name(ty), t0.elapsed().as_secs_f32());
+    Ok(())
+}
+
+/// `ruquant graft BASE.gguf DONOR.gguf OUT.gguf --only NAME,...`: BASE with the tensors whose name contains one of
+/// --only taken from DONOR (same tensor names and shapes, any type). With a donor converted with every linear kept at
+/// Q8_0 (same rotation), this is BASE with those classes free of quantization error, in seconds instead of a GPTQ run.
+pub fn graft_main(args: &[String]) -> Result<(), String> {
+    let mut pos = Vec::new();
+    let mut only: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--only" => only.extend(it.next().ok_or("--only needs a comma list")?.split(',').filter(|s| !s.is_empty()).map(String::from)),
+            _ => pos.push(a.clone()),
+        }
+    }
+    let [base, donor, output] = &pos[..] else {
+        return Err("usage: ruquant graft BASE.gguf DONOR.gguf OUT.gguf --only NAME,...".into());
+    };
+    if only.is_empty() {
+        return Err("graft: --only names the tensors to take from DONOR".into());
+    }
+    let t0 = Instant::now();
+    let g = Gguf::open(base)?;
+    let d = Gguf::open(donor)?;
+    let pick = |t: &TensorInfo| only.iter().any(|o| t.name.contains(o.as_str()));
+    let mut infos = Vec::new();
+    for t in &g.tensors {
+        let src = if pick(t) { d.tensor(&t.name).ok_or(format!("{donor}: no {}", t.name))? } else { t };
+        if src.dims != t.dims {
+            return Err(format!("{}: shape {:?} in {donor}, {:?} in {base}", t.name, src.dims, t.dims));
+        }
+        infos.push(TensorInfo { name: t.name.clone(), dims: t.dims.clone(), ty: src.ty, offset: 0 });
+    }
+    let kvs: Vec<gguf::Kv> = g.kvs.iter().map(|k| gguf::Kv { key: k.key.clone(), raw: k.raw.clone() }).collect();
+    let mut w = Writer::create(output, &kvs, &infos, g.alignment())?;
+    let mut n = 0;
+    for t in &g.tensors {
+        if pick(t) {
+            w.tensor(d.data(d.tensor(&t.name).unwrap())?)?;
+            n += 1;
+        } else {
+            w.tensor(g.data(t)?)?;
+        }
+    }
+    w.finish()?;
+    println!("{output}: {n} tensors from {donor} in {:.0} s", t0.elapsed().as_secs_f32());
     Ok(())
 }

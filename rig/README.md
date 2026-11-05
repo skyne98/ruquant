@@ -45,14 +45,45 @@ Nothing installs anything or needs root. It's someone else's machine: `env.txt` 
 
 ```sh
 rig/build_mx.sh                    # mx-llama.cpp + patches/mx-llama.cpp-ruquant.patch (ROCm 5.7 works)
-rig/spec_bench.sh MODEL [DRAFT] [N_MAX]    # llama-server decode t/s, acceptance, ms/step (SPEC=draft-dflash ...)
+rig/spec_bench.sh MODEL [DRAFT] [N_MAX]    # llama-server decode t/s, acceptance, ms/step (SPEC=draft-dflash ...);
+                                           # TEXT=file saves the generations, to check a build changes no output
+rig/prof_spec.sh MODEL DRAFT [N_MAX] [OUT] # the same under rocprof: kernel ms per verify step (PROF=--hip-trace adds host API calls)
+python3 rig/phases.py OUT/results.csv      # that trace split into head / host gap / drafter / target phases
+python3 rig/add_mtp.py MODEL SRC UNROT OUT # a rotated model's MTP layer made usable (--spec-type draft-mtp), see the script
+python3 rig/acc_bench.py MODEL DRAFT 7     # draft acceptance per category on rig/acc_prompts.json (30 prompts)
 rig/score_box.sh MODEL [label]     # KLD / top-1 vs ~/ref/ud-q8_k_xl-16.kld (copy it from accuracy/ref/)
 rig/final_box.sh MODEL DRAFT       # both, plus llama-bench forward times, with the model's own clips
 rig/upload.sh FILE HOST DEST       # big files through the tunnel: O_DIRECT reads, resumes after a drop, checks size
+rig/final_mi50.sh MODEL DRAFTER    # the final table (RESULTS.md): 1 GPU / TP2 / TP4 prefill, decode, verify, DFlash2, KLD
+rig/same_tokens.sh MODEL GPUS EXTRA  # hash of a greedy completion: a change must keep it byte for byte
+python3 rig/tp_breakdown.py ONE.csv TP2.csv TP4.csv   # prefill kernel time per category, 1 GPU vs TP (rocprof traces)
+python3 rig/draft_breakdown.py results.csv            # a one-GPU DFlash2 trace split into target / draft / inject graphs
 ggml_bench --types w4a4,q4_0 --lm q6_K,q8_0 --widths 1,6,8 | python3 rig/bench_summary.py
 ```
 
 Use `GGML_CUDA_DISABLE_GRAPHS=1` on ROCm 5.7: HIP graphs there are slower and less stable.
+
+Activations are quantized in groups of 64 (`RQ_ACT_GROUP=128|256` for experiments); models from `ruquant convert
+--wgroups` also carry a scale multiplier per 256 weights. Clips stored for the older per-token scales (0.8 / 0.7) are
+too tight for groups: `ruquant setclip FILE 1.0 1.0`, or leave them unset (1.0). Compare speeds only within one
+session: box 1 drifted ~10% between runs an hour apart. `acc_bench` runs on four GPUs at once give valid acceptance
+but +-2 ms/step timing; time with one GPU alone or with `llama-bench -p 8 -ub 8`.
+
+## Tensor parallelism (4x MI50)
+
+```sh
+HSA_FORCE_FINE_GRAIN_PCIE=1 GGML_META_TOKEN_GRAPH=0 GGML_CUDA_DISABLE_GRAPHS=1 GGML_META_SPIN=2000000 \
+  llama-server -m MODEL-rb4.gguf -md DRAFTER-rb4.gguf -ngl 99 -ngld 99 -fa 1 -lm dio -sm tensor -devd ROCm0 \
+  --spec-type draft-dflash --spec-draft-n-max 7 --samplers temperature
+```
+
+- Models need `ruquant convert/drafter --rot-blocks 4`: a whole-row online Hadamard can't be split along K, and
+  ggml aborts on such a model under `-sm tensor`.
+- `HSA_FORCE_FINE_GRAIN_PCIE=1` enables the peer-write all-reduce (PCIe P2P; `rig/p2p_check.cpp` checks every pair).
+  Without it peer writes fault and mx falls back to a slower staged all-reduce.
+- `GGML_META_TOKEN_GRAPH=0`: HIP graphs on ROCm 5.7 are slower and noisy. `GGML_TP_AR_WIRE=f16|bf16|f32` picks the
+  all-reduce payload (f16 default; bf16 costs W4A4 quality). The drafter goes on one GPU (`-devd ROCm0`).
+- `GGML_CUDA_HOST_PROF=1` prints host time per op at exit; `GGML_META_PROFILE=1` the TP dispatcher's split.
 
 ## Bring it back
 

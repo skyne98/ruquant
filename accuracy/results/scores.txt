@@ -1,0 +1,44 @@
+q4map: w4a4 gptq + unsloth rest    chunks 16  ppl/base 1.052771  KLD 0.087520  top-1 87.579 %
+fold test (random R1 + scales, Q8_0) chunks 16  ppl/base 1.002429  KLD 0.003583  top-1 97.794 %
+q4map rtn had clip 1.0                   chunks 16  ppl/base 1.160034  KLD 0.175062  top-1 82.826 %
+q4map rtn had clip 0.8                   chunks 16  ppl/base 1.110440  KLD 0.149888  top-1 83.969 %
+q4map rtn klt clip 1.0                   chunks 16  ppl/base 1.158820  KLD 0.178849  top-1 82.502 %
+q4map rtn klt clip 0.8                   chunks 16  ppl/base 1.134818  KLD 0.158848  top-1 83.498 %
+q4map rtn ost34 clip 1.0                 chunks 16  ppl/base 1.152530  KLD 0.221628  top-1 80.914 %
+q4map rtn ost34 clip 0.8                 chunks 16  ppl/base 1.127005  KLD 0.193691  top-1 82.185 %
+ost44 rtn clip 1.0                 chunks 16  ppl/base 1.138114  KLD 0.213249  top-1 81.409 %
+ost44 rtn clip 0.9                 chunks 16  ppl/base 1.125216  KLD 0.199918  top-1 81.995 %
+q4map gptq clip 0.75                     chunks 16  ppl/base 1.048906  KLD 0.106220  top-1 86.431 %
+q4map gptq clip 0.7                      chunks 16  ppl/base 1.128872  KLD 0.194094  top-1 82.509 %
+q4map gptq clip 0.85                     chunks 16  ppl/base 1.061972  KLD 0.090423  top-1 87.463 %
+q4map gptq clip 0.9                      chunks 16  ppl/base 1.061494  KLD 0.093205  top-1 87.054 %
+q4map gptq clip 0.8 H 0.7                chunks 16  ppl/base 1.039814  KLD 0.084030  top-1 87.592 %
+q4map gptq clip 0.8 H 0.9                chunks 16  ppl/base 1.053269  KLD 0.093092  top-1 87.512 %
+q4map gptq clip 0.8 H 0.65               chunks 16  ppl/base 1.052680  KLD 0.086367  top-1 87.567 %
+q4map gptq clip 0.8 H 0.6                chunks 16  ppl/base 1.039347  KLD 0.085364  top-1 87.720 %
+q4map gptq clip 0.82 H 0.7               chunks 16  ppl/base 1.047089  KLD 0.084457  top-1 87.714 %
+q4map gptq clip 0.78 H 0.7               chunks 16  ppl/base 1.046268  KLD 0.090763  top-1 87.341 %
+final-ost44-s8h8                         chunks 16  ppl/base 1.052945  KLD 0.069219  top-1 89.229 %
+s8h8 gptq act-quant Hessians, clips 0.8/0.7 chunks 16  ppl/base 1.054674  KLD 0.083138  top-1 88.093 %
+final layout, OSTQuant step 64, clips 0.8/0.7 chunks 16  ppl/base 1.054450  KLD 0.073016  top-1 88.887 %
+27b a16 all (own W4 weights, A16)  chunks 16  ppl/base 1.015223  KLD 0.026495  top-1 93.451 %
+27b keep ffn_gate+up               chunks 16  ppl/base 1.011484  KLD 0.028357  top-1 93.157 %
+27b a16 ffn_gate+up                chunks 16  ppl/base 1.025290  KLD 0.038043  top-1 92.272 %
+27b keep ffn_down                  chunks 16  ppl/base 1.023726  KLD 0.035865  top-1 92.357 %
+27b a16 ffn_down                   chunks 16  ppl/base 1.027788  KLD 0.044497  top-1 91.447 %
+27b keep dn_in                     chunks 16  ppl/base 1.034441  KLD 0.043363  top-1 91.648 %
+27b a16 dn_in                      chunks 16  ppl/base 1.031602  KLD 0.046192  top-1 90.891 %
+27b keep attn_in+out               chunks 16  ppl/base 1.036554  KLD 0.045330  top-1 91.043 %
+27b a16 attn_in+out                chunks 16  ppl/base 1.034994  KLD 0.046930  top-1 90.879 %
+27b keep first4                    chunks 16  ppl/base 1.034650  KLD 0.046721  top-1 90.940 %
+27b a16 first4                     chunks 16  ppl/base 1.028571  KLD 0.048119  top-1 90.995 %
+27b keep last4                     chunks 16  ppl/base 1.022966  KLD 0.040692  top-1 91.960 %
+27b a16 last4                      chunks 16  ppl/base 1.029123  KLD 0.044793  top-1 91.331 %
+27b base (3090)                    chunks 16  ppl/base 1.033426  KLD 0.049496  top-1 90.628 %
+27b v2 wg64 C 1.0 CH 0.95          chunks 16  ppl/base 1.035771  KLD 0.043781  top-1 91.551 %
+27b v2 wg64 clip 1.0               chunks 16  ppl/base 1.027294  KLD 0.040242  top-1 91.648 %
+27b v2 wg64 clip 0.95              chunks 16  ppl/base 1.026120  KLD 0.043169  top-1 91.557 %
+27b before (wg256, 16 win)         chunks 64  ppl/base 1.033745  KLD 0.051292  top-1 90.541 %
+27b v2 wg64                        chunks 64  ppl/base 1.027864  KLD 0.042781  top-1 91.567 %
+27b unsloth Q4_0                   chunks 64  ppl/base 1.022014  KLD 0.025852  top-1 93.336 %
+27b unsloth UD-Q4_K_XL             chunks 64  ppl/base 0.998940  KLD 0.007787  top-1 96.582 %

@@ -1,0 +1,170 @@
+{
+ "args": {
+  "seqs": 16,
+  "seqlen": 2048,
+  "batch": 4,
+  "chunk": 512,
+  "layers": 0,
+  "calib_seqs": 48,
+  "configs": null,
+  "ref": "accuracy/ref/ud-q8_k_xl-16.kld",
+  "ref_bos": null,
+  "out": "accuracy/results/scales-16.json",
+  "learn_r1": false,
+  "r1_tokens": 256,
+  "r1_steps": 400,
+  "r1_batch": 8192,
+  "r1_lr": 2e-05,
+  "r1_init": null,
+  "clip": 0.8,
+  "recipes": [
+   "a256",
+   "a128",
+   "a64",
+   "a256-ls",
+   "a256-ls2",
+   "a256-w256",
+   "a256-w256-ls",
+   "a128-w128"
+  ],
+  "selftest": false
+ },
+ "results": {
+  "a256": {
+   "ppl": 6.168978615395481,
+   "kl": 0.0706246184696783,
+   "top1": 0.8891739980449658,
+   "tokens": 16368,
+   "recipe": {
+    "name": "a256",
+    "group": 0,
+    "abits_read": 4,
+    "abits_write": 4,
+    "clip4": 0.9,
+    "clip8": 1.0,
+    "agroup": 256,
+    "wgi": 0,
+    "refit": 0
+   }
+  },
+  "a128": {
+   "ppl": 6.151134404735454,
+   "kl": 0.06795039904082625,
+   "top1": 0.8918010752688172,
+   "tokens": 16368,
+   "recipe": {
+    "name": "a128",
+    "group": 0,
+    "abits_read": 4,
+    "abits_write": 4,
+    "clip4": 0.9,
+    "clip8": 1.0,
+    "agroup": 128,
+    "wgi": 0,
+    "refit": 0
+   }
+  },
+  "a64": {
+   "ppl": 6.09986315141749,
+   "kl": 0.06800735742582022,
+   "top1": 0.8965664711632454,
+   "tokens": 16368,
+   "recipe": {
+    "name": "a64",
+    "group": 0,
+    "abits_read": 4,
+    "abits_write": 4,
+    "clip4": 0.9,
+    "clip8": 1.0,
+    "agroup": 64,
+    "wgi": 0,
+    "refit": 0
+   }
+  },
+  "a256-ls": {
+   "ppl": 6.205267430433648,
+   "kl": 0.07163899478558106,
+   "top1": 0.8877077223851417,
+   "tokens": 16368,
+   "recipe": {
+    "name": "a256-ls",
+    "group": 0,
+    "abits_read": 4,
+    "abits_write": 4,
+    "clip4": 0.9,
+    "clip8": 1.0,
+    "agroup": 256,
+    "wgi": 0,
+    "refit": 1
+   }
+  },
+  "a256-ls2": {
+   "ppl": 6.1584070396683055,
+   "kl": 0.0688152702439682,
+   "top1": 0.894672531769306,
+   "tokens": 16368,
+   "recipe": {
+    "name": "a256-ls2",
+    "group": 0,
+    "abits_read": 4,
+    "abits_write": 4,
+    "clip4": 0.9,
+    "clip8": 1.0,
+    "agroup": 256,
+    "wgi": 0,
+    "refit": 2
+   }
+  },
+  "a256-w256": {
+   "ppl": 6.179917936492915,
+   "kl": 0.06179294826231627,
+   "top1": 0.8936950146627566,
+   "tokens": 16368,
+   "recipe": {
+    "name": "a256-w256",
+    "group": 0,
+    "abits_read": 4,
+    "abits_write": 4,
+    "clip4": 0.9,
+    "clip8": 1.0,
+    "agroup": 256,
+    "wgi": 256,
+    "refit": 0
+   }
+  },
+  "a256-w256-ls": {
+   "ppl": 6.181182252108951,
+   "kl": 0.06426427534481881,
+   "top1": 0.8943670576735093,
+   "tokens": 16368,
+   "recipe": {
+    "name": "a256-w256-ls",
+    "group": 0,
+    "abits_read": 4,
+    "abits_write": 4,
+    "clip4": 0.9,
+    "clip8": 1.0,
+    "agroup": 256,
+    "wgi": 256,
+    "refit": 1
+   }
+  },
+  "a128-w128": {
+   "ppl": 6.219550054285321,
+   "kl": 0.06596138481986605,
+   "top1": 0.8921065493646139,
+   "tokens": 16368,
+   "recipe": {
+    "name": "a128-w128",
+    "group": 0,
+    "abits_read": 4,
+    "abits_write": 4,
+    "clip4": 0.9,
+    "clip8": 1.0,
+    "agroup": 128,
+    "wgi": 128,
+    "refit": 0
+   }
+  }
+ }
+}

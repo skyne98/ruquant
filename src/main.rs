@@ -26,6 +26,8 @@ fn main() -> ExitCode {
         Some("drafter") => Some(convert::drafter_main),
         Some("head") => Some(convert::head_main),
         Some("setclip") => Some(convert::setclip_main),
+        Some("a16") => Some(convert::a16_main),
+        Some("graft") => Some(convert::graft_main),
         _ => None,
     };
     if let Some(tool) = tool {

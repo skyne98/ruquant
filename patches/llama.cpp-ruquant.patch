@@ -16,20 +16,31 @@ index b188c0b..0295fee 100644
  
      // [TAG_GGML_PREC]
 diff --git a/ggml/src/ggml-common.h b/ggml/src/ggml-common.h
-index 1dbbe32..8873cd4 100644
+index 1dbbe32..b7e51a1 100644
 --- a/ggml/src/ggml-common.h
 +++ b/ggml/src/ggml-common.h
-@@ -248,6 +248,21 @@ typedef struct {
+@@ -248,6 +248,32 @@ typedef struct {
  } block_q5_1;
  static_assert(sizeof(block_q5_1) == 2 * sizeof(ggml_half) + sizeof(uint32_t) + QK5_1 / 2, "wrong q5_1 block size/padding");
  
-+// ruquant W4A4. A row of K (a multiple of 256) int4 codes in [-8, 7] with one fp32 scale per row,
-+// stored as K/256 blocks. Every block of a row repeats the row's header, so blocks stay self-contained
-+// and the codes stay 16-byte aligned for vector loads. Element 8w+j sits in bits [4j+3:4j] of qs[w].
-+//   weights:     d = per-row scale s_w, sum = sum of the row's codes over all of K
-+//   activations: d = per-token scale s_a, sum = zero point z in [0, 15]; codes are q - 8
-+// y = fp32((fp32(acc + (8 - z) * colsum) * s_a) * s_w), acc = sum of code products (int32).
++// ruquant W4A4. A row of K (a multiple of 256) int4 codes in [-8, 7], stored as K/256 blocks. Every block of a row
++// repeats the row's unit, so blocks stay self-contained and the codes stay 16-byte aligned for vector loads.
++// Element 8w+j sits in bits [4j+3:4j] of qs[w].
++//   weights:     d = the row's unit s_w; block b's scale is k_b * s_w with an integer k_b in 1..15 stored as
++//                sum = 1 << 30 | k_b (RQ_W_MULT; files from before weight groups hold the row's code sum: k_b = 1),
++//                pad[0] = row length, pad[1] = the activation clip (a float, 0 = unset)
++//   activations: groups of G = 256 / S values (S = 1, 2 or 4 per block), d = the token's unit u, sum = the groups'
++//   zero points z_g in [0, 15] (4 bits each, log2(S) in bits 16..17), pad[0] = their integer scale multipliers m_g
++//   (scale m_g * u, m_g in 1..255, 8 bits each), pad[1] = row length; codes are q - 8
++// total = sum_g (k_b(g) * m_g * (acc_g + (8 - z_g) * colsum_g)) >> RQ_TERM_SHIFT (int32 terms, an arithmetic shift,
++// an int32 sum), acc_g and colsum_g over group g, k_b(g) the weight multiplier of the block holding g;
++// y = fp32((fp32(fp32(total) * 2^RQ_TERM_SHIFT) * u) * s_w). The shift keeps the total in int32 for any input.
 +#define QK_W4A4 256
++#define RQ_TERM_SHIFT 4
++#define RQ_W_MULT(sum) ((((uint32_t) (sum)) >> 30) == 1u ? (int32_t) ((sum) & 0xF) : 1)
++// weight groups of 64 (ruquant convert --wgroups 64): sum = 1 << 30 | 1 << 29 | k0 | k1 << 4 | k2 << 8 | k3 << 12, the
++// multiplier of inputs 64 g .. 64 g + 63 of the block; other blocks have one k for all four
++#define RQ_W_MULT_G(sum, g) ((((uint32_t) (sum)) >> 29) == 3u ? (int32_t) ((((uint32_t) (sum)) >> (4 * (g))) & 0xF) : RQ_W_MULT(sum))
 +typedef struct {
 +    float    d;
 +    int32_t  sum;
@@ -42,7 +53,7 @@ index 1dbbe32..8873cd4 100644
  typedef struct {
      ggml_half d;       // delta
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
-index f4eaea5..43cff1a 100644
+index f4eaea5..604d0f3 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
 @@ -7,6 +7,7 @@
@@ -78,7 +89,7 @@ index f4eaea5..43cff1a 100644
      [GGML_TYPE_Q8_0] = {
          .from_float               = quantize_row_q8_0,
          .vec_dot                  = ggml_vec_dot_q8_0_q8_0,
-@@ -1349,17 +1368,20 @@ UseGgmlGemm1:;
+@@ -1349,17 +1368,25 @@ UseGgmlGemm1:;
          GGML_ASSERT(!widen || vec_dot_type == GGML_TYPE_F32);
          GGML_ASSERT(!widen || src1->type == GGML_TYPE_F16 || src1->type == GGML_TYPE_BF16);
  
@@ -89,16 +100,21 @@ index f4eaea5..43cff1a 100644
 -                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
 -                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1),
 -                                ne10);
-+        // ruquant A4 / A4H quantize per token (min/max and Hadamard over the whole row): rows per thread
++        // ruquant A4 / A4H quantize per token (min/max over the whole row, Hadamard per block of the weight's length): rows per thread
 +        if (vec_dot_type == GGML_TYPE_A4 || vec_dot_type == GGML_TYPE_A4H) {
 +            const bool had = vec_dot_type == GGML_TYPE_A4H;
 +            const float clip = ggml_rq_act_clip_for(ggml_rq_tensor_clip(src0->data), had); // the weight's clip
++            const int64_t n_rot = had ? ggml_rq_tensor_rot(src0->data, ne10) : 0;          // and Hadamard length
 +            for (int64_t i13 = 0; i13 < ne13; ++i13) {
 +                for (int64_t i12 = 0; i12 < ne12; ++i12) {
 +                    for (int64_t i11 = ith; i11 < ne11; i11 += nth) {
-+                        (had ? quantize_row_a4h_clip : quantize_row_a4_clip)(
-+                            (float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
-+                            (block_w4a4 *)    (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1), ne10, clip);
++                        float * x = (float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11);
++                        block_w4a4 * y = (block_w4a4 *) (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1);
++                        if (had) {
++                            quantize_row_a4h_clip_n(x, y, ne10, clip, n_rot);
++                        } else {
++                            quantize_row_a4_clip(x, y, ne10, clip);
++                        }
 +                    }
                  }
              }
@@ -108,7 +124,7 @@ index f4eaea5..43cff1a 100644
          const int64_t bs = ggml_blck_size(vec_dot_type);
  
          for (int64_t i13 = 0; i13 < ne13; ++i13) {
-@@ -1382,7 +1404,7 @@ UseGgmlGemm1:;
+@@ -1382,7 +1409,7 @@ UseGgmlGemm1:;
                  }
              }
          }
@@ -118,15 +134,17 @@ index f4eaea5..43cff1a 100644
  
      if (ith == 0) {
 diff --git a/ggml/src/ggml-cpu/quants.c b/ggml/src/ggml-cpu/quants.c
-index 44ea9fa..8e554ec 100644
+index 44ea9fa..0cdaccf 100644
 --- a/ggml/src/ggml-cpu/quants.c
 +++ b/ggml/src/ggml-cpu/quants.c
-@@ -496,6 +496,30 @@ void ggml_vec_dot_q5_1_q8_1_generic(int n, float * GGML_RESTRICT s, size_t bs, c
+@@ -496,6 +496,41 @@ void ggml_vec_dot_q5_1_q8_1_generic(int n, float * GGML_RESTRICT s, size_t bs, c
      *s = sumf;
  }
  
-+// ruquant W4A4: x is one weight row (W4A4 / W4A4H), y one activation row (A4 / A4H), n = K.
-+// Integer accumulation is exact; the epilogue is the spec's fp32 sequence.
++// ruquant W4A4: x is one weight row (W4A4 / W4A4H), y one activation row (A4 / A4H), n = K. Per activation group g
++// (see rq_quantize_row_a in ggml-quants.c): acc_g + (8 - z_g) * colsum_g, times the group's integer multiplier m_g
++// and its weight block's k_b, shifted right by RQ_TERM_SHIFT; the int32 total is exact in any order. Then the spec's
++// fp32 epilogue: total * 16 * u * s_w.
 +void ggml_vec_dot_w4a4_a4(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
 +    assert(nrc == 1);
 +    assert(n % QK_W4A4 == 0);
@@ -134,19 +152,28 @@ index 44ea9fa..8e554ec 100644
 +    const block_w4a4 * GGML_RESTRICT x = vx;
 +    const block_w4a4 * GGML_RESTRICT y = vy;
 +    const int nb = n / QK_W4A4;
-+    int32_t acc = 0;
++    int32_t total = 0;
 +    for (int b = 0; b < nb; ++b) {
-+        for (int w = 0; w < QK_W4A4 / 8; ++w) {
-+            const uint32_t wx = x[b].qs[w], wy = y[b].qs[w];
-+            for (int j = 0; j < 8; ++j) {
-+                const int32_t cx = (int32_t) (((wx >> (4*j)) & 0xF) << 28) >> 28;
-+                const int32_t cy = (int32_t) (((wy >> (4*j)) & 0xF) << 28) >> 28;
-+                acc += cx * cy;
++        const int lsub = (y[b].sum >> 16) & 3, gw = (QK_W4A4 / 8) >> lsub; // words per group
++        for (int sg = 0; sg < 1 << lsub; ++sg) {
++            int32_t acc = 0, colsum = 0;
++            for (int w = sg*gw; w < (sg + 1)*gw; ++w) {
++                const uint32_t wx = x[b].qs[w], wy = y[b].qs[w];
++                for (int j = 0; j < 8; ++j) {
++                    const int32_t cx = (int32_t) (((wx >> (4*j)) & 0xF) << 28) >> 28;
++                    const int32_t cy = (int32_t) (((wy >> (4*j)) & 0xF) << 28) >> 28;
++                    acc += cx * cy;
++                    colsum += cx;
++                }
 +            }
++            const int32_t z = (y[b].sum >> (4*sg)) & 0xF, m = (int32_t) (((uint32_t) y[b].pad[0] >> (8*sg)) & 0xFF);
++            // weight groups of 64 (RQ_W_MULT_G) need activation groups of 64: one multiplier per activation group
++            GGML_ASSERT(lsub == 2 || (((uint32_t) x[b].sum) >> 29) != 3u);
++            const int32_t kw = RQ_W_MULT_G(x[b].sum, sg << (2 - lsub));
++            total += (kw * m * (acc + (8 - z) * colsum)) >> RQ_TERM_SHIFT; // |term| < 2^27
 +        }
 +    }
-+    const int32_t corr = acc + (8 - y[0].sum) * x[0].sum;
-+    *s = ((float) corr * y[0].d) * x[0].d;
++    *s = (((float) total * (float) (1 << RQ_TERM_SHIFT)) * y[0].d) * x[0].d;
 +}
 +
  void ggml_vec_dot_q8_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
@@ -165,7 +192,7 @@ index f04be52..630cb8e 100644
  void ggml_vec_dot_mxfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
  void ggml_vec_dot_nvfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 06956ce..5a7379d 100644
+index 06956ce..c550198 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -27,6 +27,7 @@
@@ -243,7 +270,45 @@ index 06956ce..5a7379d 100644
          // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
          if (node->op == GGML_OP_MUL_MAT_ID) {
              const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-@@ -5745,6 +5776,9 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
+@@ -3948,6 +3979,29 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+ 
+     ggml_tensor * node = cgraph->nodes[i];
+ 
++    // ruquant: W4A4 matmuls of the same activation that follow each other (gate and up) as one skinny launch
++    if (node->op == GGML_OP_MUL_MAT && (node->src[0]->type == GGML_TYPE_W4A4 || node->src[0]->type == GGML_TYPE_W4A4H)) {
++        const ggml_tensor * src0s[3] = { node->src[0], nullptr, nullptr };
++        ggml_tensor *       dsts[3]  = { node, nullptr, nullptr };
++        int n = 1, last = i;
++        for (int j = i + 1; j < cgraph->n_nodes && n < 3; ++j) {
++            ggml_tensor * nj = cgraph->nodes[j];
++            if (ggml_cuda_is_view_or_noop(nj)) {
++                continue;
++            }
++            if ((nj->flags & GGML_TENSOR_FLAG_COMPUTE) == 0 || !ggml_cuda_rq_w4a4_can_fuse(node, nj)) {
++                break;
++            }
++            src0s[n]  = nj->src[0];
++            dsts[n++] = nj;
++            last      = j;
++        }
++        if (n > 1) {
++            ggml_cuda_mul_mat_rq_w4a4_fused(*cuda_ctx, src0s, dsts, n, node->src[1]);
++            return last - i;
++        }
++    }
++
+     if (node->op == GGML_OP_MUL_MAT_ID && cuda_ctx->stream_context().concurrent_events.empty() &&
+             ggml_cuda_match_shared_expert(cgraph, i, i + 3) &&
+             ggml_cuda_should_fuse_mul_mat_vec_q(cgraph->nodes[i + 2]->src[1])) {
+@@ -5000,6 +5054,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend,
+     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
+ 
+     ggml_cuda_set_device(cuda_ctx->device);
++    ggml_cuda_rq_graph_begin(*cuda_ctx); // ruquant: a new evaluation, drop the shared quantized activation
+ 
+     bool use_cuda_graph             = false;
+     bool cuda_graph_update_required = false;
+@@ -5745,6 +5800,9 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
  
  // TODO: move these functions here
  static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
@@ -253,7 +318,7 @@ index 06956ce..5a7379d 100644
      ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
  
      // check if all the sources are allocated on this device
-@@ -5836,6 +5870,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+@@ -5836,6 +5894,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                      }
                  }
  #endif // GGML_USE_MUSA
@@ -320,12 +385,211 @@ index 1a9cf55..efd7a7d 100644
      if (!ggml_is_quantized(type)) {
          return false;
      }
+diff --git a/ggml/src/ggml-cuda/rq-w4a4-gemm.cuh b/ggml/src/ggml-cuda/rq-w4a4-gemm.cuh
+new file mode 100644
+index 0000000..eb4b9d1
+--- /dev/null
++++ b/ggml/src/ggml-cuda/rq-w4a4-gemm.cuh
+@@ -0,0 +1,193 @@
++#pragma once
++// ruquant W4A4 GEMM for prefill widths, shaped for gfx906 (no matrix unit: v_dot8_i32_i4 on VGPRs).
++// A workgroup of 256 threads owns 128 channels x 64 tokens and runs its slice of K one tile of 8 code words (64
++// inputs, the smallest activation group) at a time. Everything a tile needs goes through LDS, double buffered and
++// fetched a tile ahead: the code words, and the group terms already decoded (8 - z and m per token, colsum and the
++// block multiplier k per channel). Each thread multiplies 4 channels by 8 tokens from registers (per word one 16 B
++// weight read and two 16 B activation reads for 32 dot8s). The integer math is the skinny kernel's
++// (rq-w4a4-skinny.cuh): per activation group sum = (8 - z) colsum + code products, tot += (k m sum) >> RQ_TERM_SHIFT,
++// so the result is bit-exact with the CPU reference. Split-K (gridDim.z > 1) adds int32 partials atomically
++// (exact in any order) and the last workgroup of a tile writes it out.
++#include "rq-w4a4-skinny.cuh"
++
++constexpr int RQ_GEMM_BN      = 128; // channels per workgroup
++constexpr int RQ_GEMM_BT      = 64;  // tokens per workgroup
++constexpr int RQ_GEMM_KT      = 8;   // code words per K tile
++constexpr int RQ_GEMM_THREADS = 256;
++
++// pins 8 values in registers at this point of the program (an empty volatile asm that reads and writes them)
++static __device__ __forceinline__ void rq_keep8(int (&x)[8]) {
++#if defined(GGML_USE_HIP) && defined(__HIP_DEVICE_COMPILE__)
++    asm volatile("" : "+v"(x[0]), "+v"(x[1]), "+v"(x[2]), "+v"(x[3]), "+v"(x[4]), "+v"(x[5]), "+v"(x[6]), "+v"(x[7]));
++#else
++    asm volatile("" : "+r"(x[0]), "+r"(x[1]), "+r"(x[2]), "+r"(x[3]), "+r"(x[4]), "+r"(x[5]), "+r"(x[6]), "+r"(x[7]));
++#endif
++}
++
++struct rq_gemm_stage {
++    int32_t w[RQ_GEMM_KT][RQ_GEMM_BN]; // code words, word-major
++    int32_t a[RQ_GEMM_KT][RQ_GEMM_BT];
++    int32_t zc[RQ_GEMM_BT];            // 8 - z_g per token
++    int32_t m[RQ_GEMM_BT];             // m_g per token
++    int32_t cs[RQ_GEMM_BN];            // colsum_g per channel
++    int32_t kb[RQ_GEMM_BN];            // k_b per channel
++};
++
++// Aq [Mp][Kw] token-major codes, mz [K / G][Mp] (m_g | z_g << 8), sa [Mp]: Mp a multiple of RQ_GEMM_BT, rows past M
++// are read but never written out. Wt in the rq_wt_index layout, sw [N], colsum [K / G][N], wk [K / 64][N], D [M][ldd].
++// GSH: log2 of the K tiles per activation group (G / 64); kz: K tiles per split (a multiple of a group). N a
++// multiple of RQ_GEMM_BN;
++// grid (N / RQ_GEMM_BN, Mp / RQ_GEMM_BT, splits). With splits, acc [Mp][N] and cnt [tiles] start at zero.
++template <int GSH>
++static __global__ void __launch_bounds__(RQ_GEMM_THREADS)
++rq_gemm_kernel(const int32_t * __restrict__ Aq, const int32_t * __restrict__ mz, const float * __restrict__ sa,
++               const int32_t * __restrict__ Wt, const float * __restrict__ sw, const int16_t * __restrict__ colsum,
++               const int8_t * __restrict__ wk, float * __restrict__ D, int ldd, int N, int M, int Mp, int Kw, int kz,
++               int32_t * __restrict__ acc, int32_t * __restrict__ cnt) {
++    __shared__ rq_gemm_stage st[2];
++    constexpr int gt = 1 << GSH;
++    const int tid = threadIdx.x, wid = rq_wave_id();
++    const int n0 = blockIdx.x * RQ_GEMM_BN, t0 = blockIdx.y * RQ_GEMM_BT;
++    const int cq = tid % 32, tq = tid / 32; // this thread's outputs: channels n0 + 4 cq + c, tokens t0 + 8 tq + t
++    const int k_lo = blockIdx.z * kz, k_hi = min(k_lo + kz, Kw / RQ_GEMM_KT);
++
++    // per tile, each thread fetches 4 weight words (channel group gi, step si, lane li of the rq_wt_index layout),
++    // 2 activation words (token at, words aw, aw + 1) and one group term: threads 0..127 a channel's colsum and k,
++    // 128..191 a token's m | z << 8 (split by wave, so the addresses stay scalar)
++    const int li = tid % RQ_WAVE, si = (tid / RQ_WAVE) % 2, gi = tid / (2 * RQ_WAVE);
++    const rq_words<RQ_KW> * wsrc = reinterpret_cast<const rq_words<RQ_KW> *>(Wt) +
++                                   ((size_t) (n0 / RQ_WAVE + gi) * (Kw / RQ_KW) + si) * RQ_WAVE + li;
++    const int wn = gi * RQ_WAVE + li;
++    const int at = tid / 4, aw = 2 * (tid % 4);
++    const int2 * asrc = reinterpret_cast<const int2 *>(Aq + (size_t) (t0 + at) * Kw + aw);
++
++    rq_words<RQ_KW> wv;
++    int2 av;
++    int p0 = 0, p1 = 0;
++#define RQ_GEMM_FETCH(kt_)                                                          \
++    do {                                                                            \
++        wv = wsrc[(size_t) (kt_) * 2 * RQ_WAVE];                                    \
++        av = asrc[(kt_) * RQ_GEMM_KT / 2];                                          \
++        if (wid < RQ_GEMM_BN / RQ_WAVE) {                                           \
++            p0 = colsum[(size_t) ((kt_) >> GSH) * N + n0 + tid];                    \
++            p1 = wk[(size_t) (kt_) * N + n0 + tid];                                 \
++        } else if (wid < (RQ_GEMM_BN + RQ_GEMM_BT) / RQ_WAVE) {                     \
++            p0 = mz[(size_t) ((kt_) >> GSH) * Mp + t0 + tid - RQ_GEMM_BN];          \
++        }                                                                           \
++    } while (0)
++#define RQ_GEMM_STASH(s_)                                                           \
++    do {                                                                            \
++        _Pragma("unroll") for (int i = 0; i < 4; ++i) (s_).w[si * 4 + i][wn] = wv.v[i]; \
++        (s_).a[aw][at] = av.x;                                                      \
++        (s_).a[aw + 1][at] = av.y;                                                  \
++        if (wid < RQ_GEMM_BN / RQ_WAVE) {                                           \
++            (s_).cs[tid] = p0;                                                      \
++            (s_).kb[tid] = p1;                                                      \
++        } else if (wid < (RQ_GEMM_BN + RQ_GEMM_BT) / RQ_WAVE) {                     \
++            (s_).zc[tid - RQ_GEMM_BN] = 8 - (p0 >> 8);                              \
++            (s_).m[tid - RQ_GEMM_BN] = p0 & 0xff;                                   \
++        }                                                                           \
++    } while (0)
++
++    int sum[4][8], tot[4][8];
++#pragma unroll
++    for (int c = 0; c < 4; ++c)
++#pragma unroll
++        for (int t = 0; t < 8; ++t) sum[c][t] = tot[c][t] = 0;
++
++    if (k_lo < k_hi) {
++        RQ_GEMM_FETCH(k_lo);
++        RQ_GEMM_STASH(st[0]);
++    }
++    __syncthreads();
++    for (int kt = k_lo; kt < k_hi; ++kt) {
++        const rq_gemm_stage & s = st[(kt - k_lo) & 1];
++        const bool more = kt + 1 < k_hi;
++        if (more) RQ_GEMM_FETCH(kt + 1); // in flight while this tile runs
++        if ((kt & (gt - 1)) == 0) { // a group starts: its zero-point term
++            const int4 c4 = *reinterpret_cast<const int4 *>(&s.cs[4 * cq]);
++            const int4 z0 = *reinterpret_cast<const int4 *>(&s.zc[8 * tq]);
++            const int4 z1 = *reinterpret_cast<const int4 *>(&s.zc[8 * tq + 4]);
++            const int cs[4] = { c4.x, c4.y, c4.z, c4.w };
++            const int zc[8] = { z0.x, z0.y, z0.z, z0.w, z1.x, z1.y, z1.z, z1.w };
++#pragma unroll
++            for (int c = 0; c < 4; ++c)
++#pragma unroll
++                for (int t = 0; t < 8; ++t) sum[c][t] = __mul24(zc[t], cs[c]);
++        }
++        // one word ahead: word j + 1's LDS reads are in flight during word j's dot8s. The fences keep the compiler
++        // from hoisting all of them and sinking the dot8s to the fold (it did, at G = 64: 200 VGPRs, one wave per
++        // SIMD): the sums pinned per word, sched_barrier for the machine scheduler, the empty asm for the IR passes
++        int4 w = *reinterpret_cast<const int4 *>(&s.w[0][4 * cq]);
++        int4 a0 = *reinterpret_cast<const int4 *>(&s.a[0][8 * tq]);
++        int4 a1 = *reinterpret_cast<const int4 *>(&s.a[0][8 * tq + 4]);
++#pragma unroll
++        for (int j = 0; j < RQ_GEMM_KT; ++j) {
++            const int jn = j + 1 < RQ_GEMM_KT ? j + 1 : j;
++            const int4 wn  = *reinterpret_cast<const int4 *>(&s.w[jn][4 * cq]);
++            const int4 a0n = *reinterpret_cast<const int4 *>(&s.a[jn][8 * tq]);
++            const int4 a1n = *reinterpret_cast<const int4 *>(&s.a[jn][8 * tq + 4]);
++            const int wc[4] = { w.x, w.y, w.z, w.w };
++            const int a8[8] = { a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w };
++#pragma unroll
++            for (int c = 0; c < 4; ++c)
++#pragma unroll
++                for (int t = 0; t < 8; ++t) sum[c][t] = rq_dot8(a8[t], wc[c], sum[c][t]);
++#pragma unroll
++            for (int c = 0; c < 4; ++c) rq_keep8(sum[c]);
++            rq_block_fence();
++            asm volatile("" ::: "memory");
++            w = wn;
++            a0 = a0n;
++            a1 = a1n;
++        }
++        if (((kt + 1) & (gt - 1)) == 0) { // the group ends: fold it in
++            const int4 k4 = *reinterpret_cast<const int4 *>(&s.kb[4 * cq]);
++            const int4 m0 = *reinterpret_cast<const int4 *>(&s.m[8 * tq]);
++            const int4 m1 = *reinterpret_cast<const int4 *>(&s.m[8 * tq + 4]);
++            // narrowed (k 1..15, m 1..255), so k m is a known 24-bit product: unnarrowed, the outer __mul24 cost a
++            // quarter-rate multiply (an inline-asm fold without the compiler's extra shift per output was slower)
++            const int kb[4] = { k4.x & 0x7fff, k4.y & 0x7fff, k4.z & 0x7fff, k4.w & 0x7fff };
++            const int m[8] = { m0.x & 0xff, m0.y & 0xff, m0.z & 0xff, m0.w & 0xff, m1.x & 0xff, m1.y & 0xff, m1.z & 0xff, m1.w & 0xff };
++#pragma unroll
++            for (int c = 0; c < 4; ++c)
++#pragma unroll
++                for (int t = 0; t < 8; ++t) tot[c][t] += __mul24(kb[c] * m[t], sum[c][t]) >> RQ_TERM_SHIFT;
++        }
++        if (more) RQ_GEMM_STASH(st[(kt + 1 - k_lo) & 1]);
++        __syncthreads();
++    }
++
++    if (gridDim.z > 1) { // split-K: add the partial sums; the last workgroup of the tile writes them out
++        int32_t * at_ = acc + (size_t) (t0 + 8 * tq) * N + n0 + 4 * cq;
++#pragma unroll
++        for (int t = 0; t < 8; ++t)
++#pragma unroll
++            for (int c = 0; c < 4; ++c) atomicAdd(at_ + (size_t) t * N + c, tot[c][t]);
++        __threadfence();
++        __shared__ int last;
++        __syncthreads();
++        if (tid == 0) last = atomicAdd(&cnt[blockIdx.y * gridDim.x + blockIdx.x], 1) == (int) gridDim.z - 1;
++        __syncthreads();
++        if (!last) return;
++        __threadfence();
++#pragma unroll
++        for (int t = 0; t < 8; ++t)
++#pragma unroll
++            for (int c = 0; c < 4; ++c) tot[c][t] = rq_load_l2(at_ + (size_t) t * N + c);
++    }
++#pragma unroll
++    for (int t = 0; t < 8; ++t) {
++        const int tok = t0 + 8 * tq + t;
++        if (tok >= M) break;
++        const float u = sa[tok];
++#pragma unroll
++        for (int c = 0; c < 4; ++c) {
++            const int n = n0 + 4 * cq + c;
++            D[(size_t) tok * ldd + n] =
++                __fmul_rn(__fmul_rn(__fmul_rn(__int2float_rn(tot[c][t]), (float) (1 << RQ_TERM_SHIFT)), u), sw[n]);
++        }
++    }
++#undef RQ_GEMM_FETCH
++#undef RQ_GEMM_STASH
++}
 diff --git a/ggml/src/ggml-cuda/rq-w4a4-skinny.cuh b/ggml/src/ggml-cuda/rq-w4a4-skinny.cuh
 new file mode 100644
-index 0000000..28770db
+index 0000000..ef2eea0
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/rq-w4a4-skinny.cuh
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,315 @@
 +#pragma once
 +// ruquant skinny W4A4 GEMM for decode / speculative-verify widths (T = 1..64 tokens), shaped for gfx906
 +// (from ruquant's gfx906/w4a4_skinny.h, measured on MI50).
@@ -417,15 +681,21 @@ index 0000000..28770db
 +    return ((size_t) (k_word / KA) * T + t) * KA + k_word % KA;
 +}
 +
-+// The spec epilogue, fused: y = (fp32(acc + (8 - z) * colsum) * s_a) * s_w into D [M][ldd], for the M real tokens.
-+// With split-K (gridDim.y > 1) the workgroups add into acc [M][N] in L2 (integers: any order is exact) and bump
++// Activation groups (ggml-quants.c, rq_quantize_row_a): each G activations of a token (G = 32 << gsh: 256, 128 or 64)
++// have a zero point z_g and a scale m_g * u, m_g an integer, so the dot product is the exact integer total =
++// sum_g k_b * m_g * (acc_g + (8 - z_g) * colsum_g), k_b the integer multiplier of the weight block (256 inputs)
++// holding group g. The spec epilogue, fused:
++// y = ((fp32(total) * 16) * u) * s_w into D [M][ldd], for the M real tokens. Each group's term k m S fits int32
++// (|S| <= 2^15, k m <= 3825) and goes into the total as term >> RQ_TERM_SHIFT, so the total stays in int32 for any
++// input (rotated massive activations against aligned rows passed 2^31 unshifted). With split-K (gridDim.y > 1) the workgroups add into acc [M][N] in L2 (integers: any order is exact) and bump
 +// cnt[blockIdx.x]; the last one to arrive reads the totals and writes D. acc and cnt start at zero (the activation
 +// quantizer clears them).
 +struct rq_epi {
-+    const float * s_a;
-+    const int32_t * z;
++    const float * s_a;      // u per token
++    const int32_t * mul;    // m_g | z_g << 8, [K / 256][T]
 +    const float * sw;
-+    const int32_t * colsum;
++    const int16_t * colsum; // [K / G][N]
++    const int8_t * wk;      // weight multipliers k per 64 inputs, [K / 64][N]
 +    float * D;
 +    int ldd;
 +    int M;
@@ -433,33 +703,62 @@ index 0000000..28770db
 +};
 +
 +static __device__ __forceinline__ float rq_epi_value(const rq_epi & e, int32_t acc, int t, int n) {
-+    const int c = acc + (8 - e.z[t]) * e.colsum[n];
-+    return __fmul_rn(__fmul_rn(__int2float_rn(c), e.s_a[t]), e.sw[n]);
++    return __fmul_rn(__fmul_rn(__fmul_rn(__int2float_rn(acc), (float) (1 << RQ_TERM_SHIFT)), e.s_a[t]), e.sw[n]);
 +}
++
++// One weight matrix of a launch. Up to three matrices that read the same activation (gate and up, ...) share a
++// launch, each over its own range of workgroups along x, so a workgroup's job is uniform.
++struct rq_job {
++    const int32_t * Wt;
++    int32_t * acc; // split-K sums [M][N]
++    int N;
++    int nblk;      // workgroups along x: N / (RQ_WAVE * R)
++    rq_epi epi;
++};
++struct rq_jobs {
++    rq_job j[3];
++    int n;
++    int gsh; // steps (of RQ_KW words) per activation group, log2
++};
 +
 +template <int T, int R> constexpr size_t rq_lds_bytes(int W) {
 +    return W > 1 ? (size_t) R * T * RQ_WAVE * sizeof(int32_t) : 0;
 +}
 +
 +// Ac: activation words (element 8w+j in bits [4j+3:4j], stored as q-8), rq_act_index
-+// Wt: weight words, rq_wt_index
-+// acc: [M][N] int32 split-K sums (gridDim.y > 1), epi: the fused epilogue (see rq_epi).
-+// grid (N / (RQ_WAVE*R), ceil(Kw / kw_split)), block RQ_WAVE*W (W <= 8), rq_lds_bytes<T, R>(W) dynamic LDS;
-+// Kw and kw_split multiples of 4.
++// per job: Wt weight words (rq_wt_index), acc [M][N] int32 split-K sums (gridDim.y > 1), epi the fused epilogue.
++// grid (sum of the jobs' nblk, ceil(Kw / kw_split)), block RQ_WAVE*W (W <= 8), rq_lds_bytes<T, R>(W) dynamic
++// LDS; Kw and kw_split multiples of an activation group (RQ_KW << jobs.gsh words).
 +// PF: activations one token block ahead, from T = 24 where a block is only 32 dot8s.
 +template <int T, int R, int KA = rq_cfg<T>::KA, int TB = rq_cfg<T>::TB, bool PF = (T >= 24 && TB * KA <= 32)>
 +static __global__ void __launch_bounds__(RQ_WAVE * 8)
-+rq_skinny_kernel(const int32_t * __restrict__ Ac, const int32_t * __restrict__ Wt, int32_t * __restrict__ acc,
-+                 int N, int Kw, int kw_split, const rq_epi epi) {
++rq_skinny_kernel(const int32_t * __restrict__ Ac, const rq_jobs jobs, int Kw, int kw_split) {
 +    static_assert(RQ_KW % KA == 0 && T % TB == 0, "bad preset");
++    int bx = blockIdx.x, ji = 0;
++    if (bx >= jobs.j[0].nblk) {
++        bx -= jobs.j[0].nblk;
++        ji = 1;
++        if (bx >= jobs.j[1].nblk) {
++            bx -= jobs.j[1].nblk;
++            ji = 2;
++        }
++    }
++    // field by field with uniform selects: indexing the argument array would copy it to scratch
++#define RQ_JOB(f) (ji == 0 ? jobs.j[0].f : ji == 1 ? jobs.j[1].f : jobs.j[2].f)
++    const int32_t * __restrict__ Wt = RQ_JOB(Wt);
++    int32_t * __restrict__ acc = RQ_JOB(acc);
++    const int N = RQ_JOB(N);
++    const rq_epi epi = { RQ_JOB(epi.s_a), RQ_JOB(epi.mul), RQ_JOB(epi.sw), RQ_JOB(epi.colsum), RQ_JOB(epi.wk),
++                         RQ_JOB(epi.D), RQ_JOB(epi.ldd), RQ_JOB(epi.M), RQ_JOB(epi.cnt) };
++#undef RQ_JOB
 +    constexpr int CHUNKS = RQ_KW / KA;
 +    constexpr int NB = CHUNKS * (T / TB); // token blocks per step
 +    const int lane = threadIdx.x % RQ_WAVE;
 +    const int wave = rq_wave_id(), W = blockDim.x / RQ_WAVE;
-+    const int g0 = blockIdx.x * R;
++    const int g0 = bx * R;
 +    const int wg_begin = blockIdx.y * kw_split;
 +    const int wg_steps = (min(wg_begin + kw_split, Kw) - wg_begin) / RQ_KW;
-+    const int per_wave = (wg_steps + W - 1) / W;
++    const int per_wave = (((wg_steps >> jobs.gsh) + W - 1) / W) << jobs.gsh; // whole activation groups
 +    const int s_lo = min(wave * per_wave, wg_steps);
 +    const int steps = min(s_lo + per_wave, wg_steps) - s_lo;
 +    const int w_begin = wg_begin + s_lo * RQ_KW;
@@ -472,11 +771,18 @@ index 0000000..28770db
 +    }
 +    const rq_words<TB * KA> * ap = reinterpret_cast<const rq_words<TB * KA> *>(Ac) + (size_t) (w_begin / KA) * (T / TB);
 +
-+    int sum[R][T];
++    // sum: the current activation group's code products; tot: the groups so far, each times its multipliers.
++    // Every factor fits 24 bits, so the products are __mul24 (gfx906: v_mul_lo_u32 is quarter rate).
++    int sum[R][T], tot[R][T];
 +#pragma unroll
 +    for (int r = 0; r < R; ++r)
 +#pragma unroll
-+        for (int t = 0; t < T; ++t) sum[r][t] = 0;
++        for (int t = 0; t < T; ++t) sum[r][t] = tot[r][t] = 0;
++    const int gstep0 = w_begin / RQ_KW; // a group is 1 << gsh steps
++    const int gsh = jobs.gsh, gmask = (1 << gsh) - 1;
++    int kw[R]; // the current weight block's multiplier, per channel group (a block is 8 steps)
++#pragma unroll
++    for (int r = 0; r < R; ++r) kw[r] = steps > 0 ? epi.wk[(size_t) (gstep0 >> 1) * N + (g0 + r) * RQ_WAVE + lane] : 0;
 +
 +    // software pipeline: the next step's weights are in flight while this step's dot8s run
 +    rq_words<RQ_KW> cur[R], nxt[R];
@@ -489,6 +795,17 @@ index 0000000..28770db
 +    if (PF && steps > 0) a_cur = ap[0];
 +
 +    for (int s = 0; s < steps; ++s) {
++        if (((gstep0 + s) & gmask) == 0) { // a group starts: its zero-point term
++            const int g = (gstep0 + s) >> gsh;
++            const int32_t * mz = epi.mul + (size_t) g * T;
++#pragma unroll
++            for (int r = 0; r < R; ++r) {
++                const int cs = epi.colsum[(size_t) g * N + (g0 + r) * RQ_WAVE + lane];
++                kw[r] = epi.wk[(size_t) ((gstep0 + s) >> 1) * N + (g0 + r) * RQ_WAVE + lane];
++#pragma unroll
++                for (int t = 0; t < T; ++t) sum[r][t] = __mul24(8 - (mz[t] >> 8), cs);
++            }
++        }
 +        const int s_next = s + 1 < steps ? s + 1 : s; // last step re-reads, no branch
 +#pragma unroll
 +        for (int r = 0; r < R; ++r) nxt[r] = wp[r][(size_t) s_next * RQ_WAVE];
@@ -521,6 +838,19 @@ index 0000000..28770db
 +        }
 +#pragma unroll
 +        for (int r = 0; r < R; ++r) cur[r] = nxt[r];
++        if (s == steps - 1 || ((gstep0 + s + 1) & gmask) == 0) { // a group ends here (or this wave's part of it)
++            const int32_t * mg = epi.mul + (size_t) ((gstep0 + s) >> gsh) * T;
++#pragma unroll
++            for (int t = 0; t < T; ++t) {
++                const int m = mg[t] & 0xff;
++#pragma unroll
++                for (int r = 0; r < R; ++r) {
++                    // full-rate 24-bit ops: k * m <= 15 * 255, |sum| <= 2^15
++                    tot[r][t] += __mul24(__mul24(kw[r], m), sum[r][t]) >> RQ_TERM_SHIFT;
++                    sum[r][t] = 0;
++                }
++            }
++        }
 +    }
 +
 +    // reduce the workgroup's K slices in one LDS buffer: wave 0 stores, the other waves add atomically
@@ -530,19 +860,19 @@ index 0000000..28770db
 +#pragma unroll
 +            for (int r = 0; r < R; ++r)
 +#pragma unroll
-+                for (int t = 0; t < T; ++t) rq_lds[(r * T + t) * RQ_WAVE + lane] = sum[r][t];
++                for (int t = 0; t < T; ++t) rq_lds[(r * T + t) * RQ_WAVE + lane] = tot[r][t];
 +        __syncthreads();
 +        if (wave > 0)
 +#pragma unroll
 +            for (int r = 0; r < R; ++r)
 +#pragma unroll
-+                for (int t = 0; t < T; ++t) atomicAdd(&rq_lds[(r * T + t) * RQ_WAVE + lane], sum[r][t]);
++                for (int t = 0; t < T; ++t) atomicAdd(&rq_lds[(r * T + t) * RQ_WAVE + lane], tot[r][t]);
 +        __syncthreads();
 +        if (wave == 0)
 +#pragma unroll
 +            for (int r = 0; r < R; ++r)
 +#pragma unroll
-+                for (int t = 0; t < T; ++t) sum[r][t] = rq_lds[(r * T + t) * RQ_WAVE + lane];
++                for (int t = 0; t < T; ++t) tot[r][t] = rq_lds[(r * T + t) * RQ_WAVE + lane];
 +    }
 +    if (wave != 0) return;
 +    if (gridDim.y == 1) {
@@ -551,7 +881,7 @@ index 0000000..28770db
 +#pragma unroll
 +            for (int t = 0; t < T; ++t) {
 +                const int n = (g0 + r) * RQ_WAVE + lane;
-+                if (t < epi.M) epi.D[(size_t) t * epi.ldd + n] = rq_epi_value(epi, sum[r][t], t, n);
++                if (t < epi.M) epi.D[(size_t) t * epi.ldd + n] = rq_epi_value(epi, tot[r][t], t, n);
 +            }
 +        return;
 +    }
@@ -559,11 +889,11 @@ index 0000000..28770db
 +    for (int r = 0; r < R; ++r)
 +#pragma unroll
 +        for (int t = 0; t < T; ++t) {
-+            if (t < epi.M) atomicAdd(&acc[(size_t) t * N + (g0 + r) * RQ_WAVE + lane], sum[r][t]);
++            if (t < epi.M) atomicAdd(&acc[(size_t) t * N + (g0 + r) * RQ_WAVE + lane], tot[r][t]);
 +        }
 +    __threadfence();
 +    int prev = 0;
-+    if (lane == 0) prev = atomicAdd(&epi.cnt[blockIdx.x], 1);
++    if (lane == 0) prev = atomicAdd(&epi.cnt[bx], 1);
 +    prev = __shfl_sync(0xffffffff, prev, 0, RQ_WAVE);
 +    if (prev != (int) gridDim.y - 1) return;
 +    __threadfence();
@@ -577,21 +907,30 @@ index 0000000..28770db
 +}
 diff --git a/ggml/src/ggml-cuda/rq-w4a4.cu b/ggml/src/ggml-cuda/rq-w4a4.cu
 new file mode 100644
-index 0000000..9b5d721
+index 0000000..9c11a85
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/rq-w4a4.cu
-@@ -0,0 +1,639 @@
+@@ -0,0 +1,689 @@
 +#include "rq-w4a4.cuh"
 +#if defined(GGML_USE_HIP)
 +#pragma clang fp contract(off) // the _rn intrinsics below are plain ops on HIP: keep mul + add unfused
 +#endif
 +#include "rq-w4a4-skinny.cuh"
++#include "rq-w4a4-gemm.cuh"
++
++#include <map>
++#include <mutex>
++#include <unordered_map>
++#include <vector>
 +
 +extern "C" float ggml_rq_act_clip_for(float tensor_clip, bool hadamard); // ggml-quants.c
++extern "C" int   ggml_rq_act_group(void);                                // ggml-quants.c
++extern "C" int64_t ggml_rq_rot_check(int32_t n, int64_t k);              // ggml-quants.c
 +
-+// ruquant W4A4 on CUDA. Numerics follow the CPU reference in ggml-quants.c op for op (explicit _rn
-+// intrinsics, same Hadamard summation order), so CPU and CUDA give identical outputs. The GEMM is
-+// mma.m16n8k64 s4 (sm_80+), from mi50emu's sm_86 kernel, reading the weight codes in place.
++// ruquant W4A4 on CUDA and HIP. Numerics follow the CPU reference in ggml-quants.c op for op (explicit _rn
++// intrinsics, same Hadamard summation order, exact integer accumulation over the activation groups), so CPU and GPU
++// give identical outputs. The GEMM is the skinny kernel (rq-w4a4-skinny.cuh) at verify widths and the tiled one
++// (rq-w4a4-gemm.cuh) at prefill widths.
 +
 +// same factorization as ggml_rq_hadamard_factor (ggml-quants.c)
 +static bool rq_factor(int64_t n, int & p, int & m) {
@@ -659,79 +998,76 @@ index 0000000..9b5d721
 +    }
 +}
 +
-+// The same, tiled: a block owns 64 columns of all P chunks (in LDS), its 4 waves split the P outputs, and every
-+// output keeps the sum order above (i ascending), so the bits match. P is a template parameter so the sign table
-+// and the loop bounds are constants. grid (M, m / 64), 256 threads; m a multiple of 64.
++// The same, spread out: a block holds 64 columns of all P chunks in LDS and each of its 4 waves sums one output
++// row over i ascending, so the bits match. Row a's signs come from rq_paley_masks (bit i set: subtract term i), and
++// a subtraction is an add of the sign-flipped value (a + (-b) is exactly a - b), so a term is an XOR and an add:
++// recomputing chi((a - i) mod q) per term made this VALU-bound (17408 = 68 x 256 at 6 tokens: 26 us). Out of place:
++// other blocks still read the rows a block writes. grid (M, m / 64, P / 4), 256 threads; m a multiple of 64.
 +template <int P>
-+static __global__ void __launch_bounds__(256) rq_paley_tile_kernel(float * __restrict__ x, int ldx, int m, float scale) {
-+    static_assert(P % 4 == 0, "P outputs split over 4 waves");
-+    constexpr int Q = P - 1, A = P / 4;
-+    __shared__ float  tile[P][64];
-+    __shared__ int8_t sgn[P][P];
-+    __shared__ int8_t chi[P];
-+    for (int i = threadIdx.x; i < Q; i += blockDim.x) chi[i] = i == 0 ? 0 : -1;
-+    __syncthreads();
-+    if (threadIdx.x == 0) for (int i = 1; i < Q; ++i) chi[(i * i) % Q] = 1;
-+    __syncthreads();
-+    for (int t = threadIdx.x; t < P * P; t += blockDim.x) {
-+        const int a = t / P, i = t % P;
-+        const int s = i == 0 ? (a == 0 ? 0 : 1) : (a == 0 ? -1 : chi[((a - i) % Q + Q) % Q]);
-+        sgn[a][i] = (int8_t) ((i == a ? 1 : 0) + s);
-+    }
-+    float * row = x + (size_t) blockIdx.x * ldx;
-+    const int j0 = blockIdx.y * 64;
-+    for (int t = threadIdx.x; t < P * 64; t += blockDim.x) {
-+        tile[t / 64][t % 64] = row[(size_t) (t / 64) * m + j0 + t % 64];
-+    }
-+    __syncthreads();
-+    const int jl = threadIdx.x % 64, a0 = (threadIdx.x / 64) * A;
-+    for (int aa = 0; aa < A; ++aa) {
-+        const int a = a0 + aa;
-+        float acc = 0.0f;
-+#pragma unroll 4
-+        for (int i = 0; i < P; ++i) acc = sgn[a][i] > 0 ? __fadd_rn(acc, tile[i][jl]) : __fsub_rn(acc, tile[i][jl]);
-+        row[(size_t) a * m + j0 + jl] = __fmul_rn(acc, scale);
-+    }
-+}
-+
-+// The same, one output per thread: a block holds 8 columns of all P chunks in LDS and its P*8 threads each sum one
-+// output over i ascending, so the bits match. grid (M, m / 8), P * 8 threads; m a multiple of 8.
-+template <int P>
-+static __global__ void __launch_bounds__(P * 8) rq_paley_wide_kernel(float * __restrict__ x, int ldx, int m, float scale) {
-+    constexpr int Q = P - 1;
-+    __shared__ float  tile[P][8];
-+    __shared__ int8_t chi[P];
-+    for (int i = threadIdx.x; i < Q; i += blockDim.x) chi[i] = i == 0 ? 0 : -1;
-+    __syncthreads();
-+    if (threadIdx.x == 0) for (int i = 1; i < Q; ++i) chi[(i * i) % Q] = 1;
-+    float * row = x + (size_t) blockIdx.x * ldx;
-+    const int j0 = blockIdx.y * 8;
-+    tile[threadIdx.x / 8][threadIdx.x % 8] = row[(size_t) (threadIdx.x / 8) * m + j0 + threadIdx.x % 8];
-+    __syncthreads();
-+    const int a = threadIdx.x / 8, jl = threadIdx.x % 8;
-+    float acc = 0.0f;
-+    for (int i = 0; i < P; ++i) {
-+        const int s = i == 0 ? (a == 0 ? 0 : 1) : (a == 0 ? -1 : chi[((a - i) % Q + Q) % Q]);
-+        const int e = (i == a ? 1 : 0) + s;
-+        acc = e > 0 ? __fadd_rn(acc, tile[i][jl]) : __fsub_rn(acc, tile[i][jl]);
-+    }
-+    row[(size_t) a * m + j0 + jl] = __fmul_rn(acc, scale);
-+}
-+
-+static __device__ __forceinline__ float rq_warp_min(float x) {
++static __global__ void __launch_bounds__(256) rq_paley_rows_kernel(const float * __restrict__ x, float * __restrict__ y,
++                                                                   const uint32_t * __restrict__ masks, int ldx, int m,
++                                                                   float scale) {
++    static_assert(P % 4 == 0 && P <= 96, "four output rows per block, three mask words per row");
++    __shared__ float tile[P][64];
++    const int t = threadIdx.x;
++    const size_t off = (size_t) blockIdx.x * ldx + blockIdx.y * 64;
++    const int jl = t % 64;
++    // a constant trip count, so all P / 4 loads are in flight at once
 +#pragma unroll
-+    for (int o = WARP_SIZE / 2; o > 0; o >>= 1) x = fminf(x, __shfl_xor_sync(0xffffffff, x, o, WARP_SIZE));
-+    return x;
++    for (int r = 0; r < P / 4; ++r) tile[r * 4 + t / 64][jl] = x[off + (size_t) (r * 4 + t / 64) * m + jl];
++    __syncthreads();
++    int a = blockIdx.z * 4 + t / 64;
++#if defined(GGML_USE_HIP)
++    a = __builtin_amdgcn_readfirstlane(a); // wave-uniform, so the masks come in as scalar loads
++#endif
++    const uint32_t mw[3] = { masks[3 * a], masks[3 * a + 1], masks[3 * a + 2] };
++    float acc = 0.0f;
++#pragma unroll
++    for (int i = 0; i < P; ++i) {
++        const uint32_t flip = ((mw[i / 32] >> (i % 32)) & 1u) << 31;
++        acc = acc + __uint_as_float(__float_as_uint(tile[i][jl]) ^ flip);
++    }
++    y[off + (size_t) a * m + jl] = __fmul_rn(acc, scale);
++}
++
++// Sign masks of the Paley matrix above, three words per row (P <= 96), built once per device.
++static const uint32_t * rq_paley_masks(int p) {
++    static std::mutex mutex;
++    static std::map<std::pair<int, int>, uint32_t *> tables;
++    const int device = ggml_cuda_get_device();
++    std::lock_guard<std::mutex> lock(mutex);
++    uint32_t *& d = tables[{ device, p }];
++    if (d == nullptr) {
++        const int q = p - 1;
++        std::vector<int> chi(q, -1);
++        chi[0] = 0;
++        for (int i = 1; i < q; ++i) chi[(i * i) % q] = 1;
++        std::vector<uint32_t> h(3 * p, 0);
++        for (int a = 0; a < p; ++a) {
++            for (int i = 0; i < p; ++i) {
++                const int s = i == 0 ? (a == 0 ? 0 : 1) : (a == 0 ? -1 : chi[((a - i) % q + q) % q]);
++                if ((i == a ? 1 : 0) + s <= 0) h[3 * a + i / 32] |= 1u << (i % 32);
++            }
++        }
++        CUDA_CHECK(cudaMalloc(&d, h.size() * sizeof(uint32_t)));
++        CUDA_CHECK(cudaMemcpy(d, h.data(), h.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
++    }
++    return d;
 +}
 +
 +// ---------------------------------------------------------------------------- activation quantization
-+// one block per token; aq packed codes (q - 8): token-major [M, K/8] (KA = 0) or the skinny kernel's
-+// step-major rq_act_index layout for Tp tokens (KA > 0); s_a [M], z [M]
++// one block per token, op for op as rq_quantize_row_a in ggml-quants.c: asymmetric, per group of G (256, 128 or 64)
++// a zero point z_g and a scale that is an integer multiple m_g of the token's unit u. aq: codes (q - 8), token-major
++// [M, K/8] (KA = 0) or the skinny kernel's step-major rq_act_index layout for Tp tokens (KA > 0); s_a[m] = u;
++// mz[g * Tp + m] = m_g | z_g << 8.
 +static constexpr int RQ_QUANT_THREADS = 256;
++static constexpr int RQ_AG_M = 255;       // as in ggml-quants.c
++static constexpr int RQ_MAX_BLOCKS = 128; // K <= 32768
++static constexpr int RQ_MAX_GROUPS = RQ_MAX_BLOCKS * QK_W4A4 / 64;
 +
 +static __global__ void __launch_bounds__(RQ_QUANT_THREADS)
-+rq_quantize_act_kernel(const float * __restrict__ x, int ldx, int K, float clip, int search, int32_t * __restrict__ aq,
-+                       float * __restrict__ s_a, int32_t * __restrict__ z_out, int Tp, int KA,
++rq_quantize_act_kernel(const float * __restrict__ x, int ldx, int K, int G, float clip, int32_t * __restrict__ aq,
++                       float * __restrict__ s_a, int32_t * __restrict__ mz, int Tp, int KA,
 +                       int32_t * __restrict__ zero, int64_t n_zero, int M) {
 +    const int m = blockIdx.x;
 +    if (m >= M) { // the blocks past the tokens clear the skinny kernel's split-K sums and counters, 16 ints per thread
@@ -740,269 +1076,74 @@ index 0000000..9b5d721
 +        for (int i = 0; i < 16; ++i) if (i0 + i < n_zero) zero[i0 + i] = 0;
 +        return;
 +    }
-+    const int W = K >> 3;
-+    const float4 * xr = reinterpret_cast<const float4 *>(x + (size_t) m * ldx);
-+    float mn = 0.f, mx = 0.f; // min(x, 0), max(x, 0)
-+    for (int i = threadIdx.x; i < K / 4; i += RQ_QUANT_THREADS) {
-+        const float4 v = xr[i];
-+        mn = fminf(mn, fminf(fminf(v.x, v.y), fminf(v.z, v.w)));
-+        mx = fmaxf(mx, fmaxf(fmaxf(v.x, v.y), fmaxf(v.z, v.w)));
-+    }
-+    mn = rq_warp_min(mn);
-+    mx = warp_reduce_max(mx);
-+    __shared__ float smn[RQ_QUANT_THREADS / WARP_SIZE], smx[RQ_QUANT_THREADS / WARP_SIZE];
-+    __shared__ float sh_inv, sh_z;
++    constexpr int NW = RQ_QUANT_THREADS / WARP_SIZE;
 +    const int lane = threadIdx.x % WARP_SIZE, wid = threadIdx.x / WARP_SIZE;
-+    if (lane == 0) { smn[wid] = mn; smx[wid] = mx; }
-+    __syncthreads();
-+    // experiment (RQ_ACT_SEARCH, CUDA only for now): per-token clip in 1.0 .. 0.6 with the least squared error
-+    if (search) {
-+        constexpr int NC = 9;
-+        __shared__ float c_inv[NC], c_scale[NC], c_z[NC], c_err[NC][RQ_QUANT_THREADS / WARP_SIZE];
-+        if (threadIdx.x == 0) {
-+            float a = smn[0], b = smx[0];
-+            for (int i = 1; i < RQ_QUANT_THREADS / WARP_SIZE; ++i) { a = fminf(a, smn[i]); b = fmaxf(b, smx[i]); }
-+            for (int c = 0; c < NC; ++c) {
-+                float l = a * (1.0f - 0.05f * c), h = b * (1.0f - 0.05f * c);
-+                if (l == 0.f && h == 0.f) { l = -1.f; h = 1.f; }
-+                c_scale[c] = (h - l) / 15.f;
-+                c_inv[c]   = 1.f / c_scale[c];
-+                c_z[c]     = fminf(fmaxf(rintf(-l * c_inv[c]), 0.f), 15.f);
-+            }
-+        }
-+        __syncthreads();
-+        float err[NC] = {};
-+        for (int i = threadIdx.x; i < K; i += RQ_QUANT_THREADS) {
-+            const float v = x[(size_t) m * ldx + i];
++    const int nb = K / QK_W4A4, L = G / 8; // lanes per group
++    const float * xr = x + (size_t) m * ldx;
++    __shared__ float s_lo[RQ_MAX_GROUPS], s_hi[RQ_MAX_GROUPS];
++    __shared__ float s_wmax[NW];
++    // a warp per block of 256, a lane per code word (8 values), L lanes per group
++    float wmax = 0.f;
++    for (int b = wid; b < nb; b += NW) {
++        const float4 * p = reinterpret_cast<const float4 *>(xr + b * QK_W4A4 + 8 * lane);
++        const float4 v0 = p[0], v1 = p[1];
++        float mn = fminf(fminf(fminf(fminf(v0.x, v0.y), fminf(v0.z, v0.w)), fminf(fminf(v1.x, v1.y), fminf(v1.z, v1.w))), 0.f);
++        float mx = fmaxf(fmaxf(fmaxf(fmaxf(v0.x, v0.y), fmaxf(v0.z, v0.w)), fmaxf(fmaxf(v1.x, v1.y), fmaxf(v1.z, v1.w))), 0.f);
 +#pragma unroll
-+            for (int c = 0; c < NC; ++c) {
-+                const float q = fminf(fmaxf(rintf(v * c_inv[c]) + c_z[c], 0.f), 15.f);
-+                const float e = (q - c_z[c]) * c_scale[c] - v;
-+                err[c] += e * e;
++        for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
++            if (off < L) {
++                mn = fminf(mn, __shfl_xor_sync(0xffffffff, mn, off, WARP_SIZE));
++                mx = fmaxf(mx, __shfl_xor_sync(0xffffffff, mx, off, WARP_SIZE));
 +            }
 +        }
-+#pragma unroll
-+        for (int c = 0; c < NC; ++c) {
-+            const float e = warp_reduce_sum(err[c]);
-+            if (lane == 0) c_err[c][wid] = e;
-+        }
-+        __syncthreads();
-+        if (threadIdx.x == 0) {
-+            int best = 0;
-+            float best_e = INFINITY;
-+            for (int c = 0; c < NC; ++c) {
-+                float e = 0.f;
-+                for (int w = 0; w < RQ_QUANT_THREADS / WARP_SIZE; ++w) e += c_err[c][w];
-+                if (e < best_e) { best_e = e; best = c; }
-+            }
-+            s_a[m] = c_scale[best]; z_out[m] = (int) c_z[best]; sh_inv = c_inv[best]; sh_z = c_z[best];
-+        }
-+    } else if (threadIdx.x == 0) {
-+        for (int i = 1; i < RQ_QUANT_THREADS / WARP_SIZE; ++i) { mn = fminf(mn, smn[i]); mx = fmaxf(mx, smx[i]); }
-+        mn = __fmul_rn(mn, clip);
-+        mx = __fmul_rn(mx, clip);
-+        if (mn == 0.f && mx == 0.f) { mn = -1.f; mx = 1.f; }
-+        const float scale = __fdiv_rn(__fsub_rn(mx, mn), 15.f);
-+        const float inv   = __fdiv_rn(1.f, scale);
-+        const float zf    = fminf(fmaxf(rintf(__fmul_rn(-mn, inv)), 0.f), 15.f);
-+        s_a[m]   = scale;
-+        z_out[m] = (int) zf;
-+        sh_inv   = inv;
-+        sh_z     = zf;
++        const float lo = __fmul_rn(mn, clip), hi = __fmul_rn(mx, clip);
++        if (lane % L == 0) { s_lo[(b * QK_W4A4 + 8 * lane) / G] = lo; s_hi[(b * QK_W4A4 + 8 * lane) / G] = hi; }
++        wmax = fmaxf(wmax, __fsub_rn(hi, lo));
 +    }
++    wmax = warp_reduce_max(wmax);
++    if (lane == 0) s_wmax[wid] = wmax;
 +    __syncthreads();
-+    const float inv = sh_inv, zf = sh_z;
-+    for (int w = threadIdx.x; w < W; w += RQ_QUANT_THREADS) {
-+        const float4 v0 = xr[2*w], v1 = xr[2*w + 1];
++    float R = s_wmax[0];
++#pragma unroll
++    for (int i = 1; i < NW; ++i) R = fmaxf(R, s_wmax[i]);
++    if (R == 0.f) R = 2.f;
++    const float u = __fdiv_rn(R, 15.f * RQ_AG_M);
++    if (threadIdx.x == 0) s_a[m] = u;
++    for (int b = wid; b < nb; b += NW) {
++        const int g = (b * QK_W4A4 + 8 * lane) / G;
++        const float lo = s_lo[g], hi = s_hi[g];
++        const int mg = (int) fminf(fmaxf(ceilf(__fdiv_rn(__fmul_rn(__fsub_rn(hi, lo), (float) RQ_AG_M), R)), 1.f), (float) RQ_AG_M);
++        const float inv = __fdiv_rn(1.f, __fmul_rn((float) mg, u));
++        const float zf  = fminf(fmaxf(rintf(__fmul_rn(-lo, inv)), 0.f), 15.f);
++        if (lane % L == 0) mz[(size_t) g * Tp + m] = mg | (int) zf << 8;
++        const float4 * p = reinterpret_cast<const float4 *>(xr + b * QK_W4A4 + 8 * lane);
++        const float4 v0 = p[0], v1 = p[1];
 +        const float f[8] = { v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w };
 +        uint32_t word = 0;
 +#pragma unroll
 +        for (int j = 0; j < 8; ++j) {
-+            const float qf = fminf(fmaxf(__fadd_rn(rintf(__fmul_rn(f[j], inv)), zf), 0.f), 15.f);
-+            word |= (uint32_t) (((int) qf - 8) & 0xF) << (4 * j);
++            const float q = fminf(fmaxf(__fadd_rn(rintf(__fmul_rn(f[j], inv)), zf), 0.f), 15.f);
++            word |= (uint32_t) (((int) q - 8) & 0xF) << (4 * j);
 +        }
-+        aq[KA ? rq_act_index(m, w, Tp, KA) : (size_t) m * W + w] = (int32_t) word;
++        const int w = b * (QK_W4A4 / 8) + lane;
++        aq[KA ? rq_act_index(m, w, Tp, KA) : (size_t) m * (K / 8) + w] = (int32_t) word;
 +    }
 +}
 +
-+// ---------------------------------------------------------------------------- GEMM
-+// dst[M, N] = epilogue(aq[M, K] . W[N, K]^T). Tile 128x128, K tile 128 (64 B per row), 8 warps as 2 (M) x 4 (N),
-+// warp tile 64x32 = 4 m16 x 4 n8, 3-stage cp.async pipeline. Shared rows are 4 x 16 B chunks; chunk c of row r
-+// is stored at c ^ ((r >> 1) & 3), so ldmatrix and cp.async are bank-conflict free.
-+// W rows are K/256 blocks of [16 B header | 128 B codes]: K tile kt of row n is at n*row_bytes + (kt/2)*144 + 16 + (kt%2)*64.
-+namespace rq {
-+static constexpr int BM = 128, BN = 128, BK = 128;
-+static constexpr int ROW_BYTES = BK / 2;
-+static constexpr int STAGES = 3;
-+static constexpr int GEMM_THREADS = 256;
-+static constexpr int TILE_BYTES = BM * ROW_BYTES;
-+static constexpr int STAGE_BYTES = 2 * TILE_BYTES;
-+static constexpr int SMEM_BYTES = STAGES * STAGE_BYTES; // 48 KiB
-+
-+static __device__ __forceinline__ int swz(int row, int chunk) {
-+    return row * ROW_BYTES + ((chunk ^ ((row >> 1) & 3)) << 4);
-+}
-+
-+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-+static __device__ __forceinline__ uint32_t smem_u32(const void * p) {
-+    return static_cast<uint32_t>(__cvta_generic_to_shared(p));
-+}
-+
-+static __device__ __forceinline__ void cp_async16_zfill(uint32_t dst, const void * src, bool valid) {
-+#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
-+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" :: "r"(dst), "l"(src), "r"(valid ? 16 : 0));
-+#else
-+    GGML_UNUSED(dst); GGML_UNUSED(src); GGML_UNUSED(valid); NO_DEVICE_CODE;
-+#endif
-+}
-+
-+static __device__ __forceinline__ void cp_async_commit() {
-+#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
-+    asm volatile("cp.async.commit_group;\n" ::);
-+#endif
-+}
-+
-+template <int N> static __device__ __forceinline__ void cp_async_wait() {
-+#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
-+    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
-+#endif
-+}
-+
-+static __device__ __forceinline__ void ldsm_x4(uint32_t (&r)[4], uint32_t addr) {
-+#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
-+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
-+#else
-+    GGML_UNUSED(r); GGML_UNUSED(addr); NO_DEVICE_CODE;
-+#endif
-+}
-+
-+static __device__ __forceinline__ void mma_s4_k64(int (&c)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
-+#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
-+    asm volatile("mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-+                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
-+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
-+#else
-+    GGML_UNUSED(c); GGML_UNUSED(a); GGML_UNUSED(b); NO_DEVICE_CODE;
-+#endif
-+}
-+
-+static __device__ __forceinline__ void load_stage(uint8_t * stage, const int32_t * __restrict__ A, const uint8_t * __restrict__ B,
-+                                                  int M, int N, int Kw, size_t row_bytes, int m0, int n0, int kt) {
-+    const uint32_t sA = smem_u32(stage);
-+    const uint32_t sB = smem_u32(stage + TILE_BYTES);
-+    const size_t b_off = (size_t) (kt >> 1) * sizeof(block_w4a4) + 16 + (kt & 1) * ROW_BYTES;
-+#pragma unroll
-+    for (int it = 0; it < 2; ++it) {
-+        const int c = threadIdx.x + it * GEMM_THREADS;
-+        const int row = c >> 2, chunk = c & 3;
-+        const int gm = m0 + row, gn = n0 + row;
-+        const bool va = gm < M, vb = gn < N;
-+        const int32_t * srcA = A + (size_t) (va ? gm : 0) * Kw + kt * (BK / 8) + chunk * 4;
-+        const uint8_t * srcB = B + (size_t) (vb ? gn : 0) * row_bytes + b_off + chunk * 16;
-+        cp_async16_zfill(sA + swz(row, chunk), srcA, va);
-+        cp_async16_zfill(sB + swz(row, chunk), srcB, vb);
-+    }
-+}
-+
-+static __global__ void __launch_bounds__(GEMM_THREADS, 2)
-+gemm_kernel(const int32_t * __restrict__ A, const uint8_t * __restrict__ B, const float * __restrict__ s_a,
-+            const int32_t * __restrict__ z, float * __restrict__ D, int ldd, int M, int N, int K) {
-+    extern __shared__ __align__(128) uint8_t smem[];
-+    const int Kw = K >> 3;
-+    const int KT = K / BK;
-+    const size_t row_bytes = (size_t) (K / QK_W4A4) * sizeof(block_w4a4);
-+    const int m0 = blockIdx.y * BM, n0 = blockIdx.x * BN;
-+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-+    const int wm = warp & 1, wn = warp >> 1;
-+
-+    int acc[4][4][4];
-+#pragma unroll
-+    for (int i = 0; i < 4; ++i)
-+#pragma unroll
-+        for (int j = 0; j < 4; ++j)
-+#pragma unroll
-+            for (int r = 0; r < 4; ++r) acc[i][j][r] = 0;
-+
-+#pragma unroll
-+    for (int s = 0; s < STAGES - 1; ++s) {
-+        if (s < KT) load_stage(smem + s * STAGE_BYTES, A, B, M, N, Kw, row_bytes, m0, n0, s);
-+        cp_async_commit();
-+    }
-+    for (int kt = 0; kt < KT; ++kt) {
-+        cp_async_wait<STAGES - 2>();
-+        __syncthreads();
-+        {
-+            const int nk = kt + STAGES - 1;
-+            if (nk < KT) load_stage(smem + (nk % STAGES) * STAGE_BYTES, A, B, M, N, Kw, row_bytes, m0, n0, nk);
-+            cp_async_commit();
-+        }
-+        const uint8_t * stage = smem + (kt % STAGES) * STAGE_BYTES;
-+        const uint32_t sA = smem_u32(stage);
-+        const uint32_t sB = smem_u32(stage + TILE_BYTES);
-+#pragma unroll
-+        for (int ks = 0; ks < BK / 64; ++ks) {
-+            uint32_t af[4][4], bf[4][2];
-+#pragma unroll
-+            for (int i = 0; i < 4; ++i) {
-+                const int row = wm * 64 + i * 16 + (lane & 15);
-+                ldsm_x4(af[i], sA + swz(row, 2 * ks + (lane >> 4)));
-+            }
-+#pragma unroll
-+            for (int p = 0; p < 2; ++p) {
-+                const int j = lane >> 3;
-+                const int row = wn * 32 + p * 16 + ((j >> 1) << 3) + (lane & 7);
-+                uint32_t r[4];
-+                ldsm_x4(r, sB + swz(row, 2 * ks + (j & 1)));
-+                bf[2 * p][0] = r[0]; bf[2 * p][1] = r[1];
-+                bf[2 * p + 1][0] = r[2]; bf[2 * p + 1][1] = r[3];
-+            }
-+#pragma unroll
-+            for (int i = 0; i < 4; ++i)
-+#pragma unroll
-+                for (int j = 0; j < 4; ++j) mma_s4_k64(acc[i][j], af[i], bf[j]);
-+        }
-+    }
-+    cp_async_wait<0>();
-+
-+    // epilogue: corr = acc + (8 - z[m]) * colsum[n]; y = (fp32(corr) * s_a[m]) * s_w[n]; s_w, colsum from row n's header
-+    const int g = lane >> 2, t = lane & 3;
-+#pragma unroll
-+    for (int i = 0; i < 4; ++i) {
-+#pragma unroll
-+        for (int h = 0; h < 2; ++h) {
-+            const int m = m0 + wm * 64 + i * 16 + g + 8 * h;
-+            if (m >= M) continue;
-+            const int zc = 8 - z[m];
-+            const float sa = s_a[m];
-+#pragma unroll
-+            for (int j = 0; j < 4; ++j) {
-+#pragma unroll
-+                for (int e = 0; e < 2; ++e) {
-+                    const int n = n0 + wn * 32 + j * 8 + 2 * t + e;
-+                    if (n >= N) continue;
-+                    const block_w4a4 * hdr = reinterpret_cast<const block_w4a4 *>(B + (size_t) n * row_bytes);
-+                    const int c = acc[i][j][2 * h + e] + zc * hdr->sum;
-+                    D[(size_t) m * ldd + n] = __fmul_rn(__fmul_rn(__int2float_rn(c), sa), hdr->d);
-+                }
-+            }
-+        }
-+    }
-+}
-+#endif // !GGML_USE_HIP && !GGML_USE_MUSA
-+} // namespace rq
-+
-+// ---------------------------------------------------------------------------- skinny path (gfx906; CUDA with RQ_SKINNY=1)
-+// The weight is repacked in place on first use: [Wt codes, N*K/2 bytes | s_w, N floats | colsum, N int32], which
-+// fits in the N*K/256 blocks of 144 B. On that first use tensor->extra (unused for non-split buffers) gets the
-+// tensor's state: whether it is repacked, and its activation clip from the block headers.
++// ---------------------------------------------------------------------------- skinny path (gfx906; emulated dot8 on CUDA)
++// The weight is repacked in place on first use: [Wt codes, N*K/2 bytes | s_w, N floats | colsum, K/G x N int16,
++// per activation group of G | k_b, K/256 x N int16, the blocks' multipliers], which fits in the N*K/256 blocks of
++// 144 B. On that first use tensor->extra (unused for non-split buffers) gets the
++// tensor's state: whether it is repacked, and its activation clip and Hadamard length from the block headers.
 +struct rq_tensor_info {
-+    bool  repacked;
-+    float clip; // block 0 header pad[1]; 0 = unset
++    bool    repacked;
++    float   clip; // block 0 header pad[1]; 0 = unset
++    int32_t rot;  // block 0 header pad[0]: W4A4H's Hadamard length (the row, or a block of it)
++    bool    wg64; // weight multipliers per 64 inputs (block 0 header sum, RQ_W_MULT_G): activation groups of 64 only
 +};
 +
 +static __global__ void rq_repack_kernel(const uint8_t * __restrict__ src, int32_t * __restrict__ wt, float * __restrict__ sw,
-+                                        int32_t * __restrict__ colsum, int N, int K) {
++                                        int N, int K) {
 +    const int Kw = K / 8;
 +    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
 +    if (i >= (int64_t) N * Kw) return;
@@ -1011,9 +1152,34 @@ index 0000000..9b5d721
 +    wt[rq_wt_index(c, kw, Kw)] = *reinterpret_cast<const int32_t *>(row + (kw / 32) * sizeof(block_w4a4) + 16 + (kw % 32) * 4);
 +    if (kw == 0) {
 +        const block_w4a4 * h = reinterpret_cast<const block_w4a4 *>(row);
-+        sw[c]     = h->d;
-+        colsum[c] = h->sum;
++        sw[c] = h->d;
 +    }
++}
++
++// colsum[g * N + c]: the sum of row c's codes over activation group g (G inputs; |sum| <= 8 G fits int16)
++static __global__ void rq_colsum_kernel(const uint8_t * __restrict__ src, int16_t * __restrict__ colsum, int N, int K, int G) {
++    const int ng = K / G;
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= (int64_t) N * ng) return;
++    const int c = (int) (i % N), g = (int) (i / N);
++    const block_w4a4 * b = reinterpret_cast<const block_w4a4 *>(src + ((size_t) c * (K / QK_W4A4) + g * G / QK_W4A4) * sizeof(block_w4a4));
++    const int w0 = (g * G % QK_W4A4) / 8;
++    int sum = 0;
++    for (int w = w0; w < w0 + G / 8; ++w)
++#pragma unroll
++        for (int j = 0; j < 8; ++j) sum += (int32_t) (((b->qs[w] >> (4 * j)) & 0xF) << 28) >> 28;
++    colsum[i] = (int16_t) sum;
++}
++
++// wk[g * N + c]: row c's scale multiplier for inputs 64 g .. 64 g + 63 (RQ_W_MULT_G; one per block of 256 in
++// files without weight groups of 64), int8 so the [K / 64][N] array still fits the blocks' slack
++static __global__ void rq_wk_kernel(const uint8_t * __restrict__ src, int8_t * __restrict__ wk, int N, int K) {
++    const int nb = K / QK_W4A4;
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= (int64_t) N * (K / 64)) return;
++    const int c = (int) (i % N), g = (int) (i / N);
++    const block_w4a4 * h = reinterpret_cast<const block_w4a4 *>(src + ((size_t) c * nb + g / 4) * sizeof(block_w4a4));
++    wk[i] = (int8_t) RQ_W_MULT_G(h->sum, g % 4);
 +}
 +
 +static int rq_skinny_tp(int64_t m) {
@@ -1026,7 +1192,9 @@ index 0000000..9b5d721
 +    int R, KA, W, G, kw_split, groups;
 +};
 +
-+static rq_skinny_shape rq_skinny_plan(int tp, int N, int Kw) {
++// N_launch: the channels of the whole launch (more than N when several weights share it, see rq_jobs). K is split
++// in whole activation groups of gsteps steps: each group's term is shifted (RQ_TERM_SHIFT), so one wave folds it.
++static rq_skinny_shape rq_skinny_plan(int tp, int N, int Kw, int N_launch, int gsteps) {
 +    int R0 = 1, KA = 1;
 +    switch (tp) {
 +        case 1:  R0 = rq_cfg<1>::R;  KA = rq_cfg<1>::KA;  break;
@@ -1045,54 +1213,63 @@ index 0000000..9b5d721
 +    const int steps = Kw / RQ_KW;
 +    static const int env_w = getenv("RQ_SKINNY_W") ? atoi(getenv("RQ_SKINNY_W")) : 0;
 +    static const int env_g = getenv("RQ_SKINNY_G") ? atoi(getenv("RQ_SKINNY_G")) : 0;
-+    // MI50 sweep (rig/results/skinny-sweep-t8.txt): 8 waves with a 4-way split-K is within noise of the best launch for
-+    // every 27B shape at the verify widths, a 2-way split at T <= 2
++    // 8 waves with a 2-way split-K. Alone, a 4-way split was within noise of the best for every 27B shape at the verify
++    // widths (rig/results/skinny-sweep-t8.txt), but inside a forward 2-way wins: same on one MI50, and the narrower
++    // shapes under tensor parallelism get 12% (TP = 2) and 12% (TP = 4) faster T = 8 forwards
 +    const int W = env_w > 0 ? std::min(env_w, 8) : 8;
-+    int G = env_g > 0 ? env_g : tp <= 2 ? 2 : 4;
-+    G = std::max(1, std::min(G, steps / W));
-+    const int steps_per_wg = (steps + G - 1) / G;
-+    G = (steps + steps_per_wg - 1) / steps_per_wg;
-+    return { R, KA, W, G, steps_per_wg * RQ_KW, groups };
++    int G = env_g > 0 ? env_g : 2;
++    // a launch with this many channel groups fills the device without splitting K, and skips the split-K fixup
++    // (MI50, T = 8: gate+up fused, 5120 x 34816, 179 -> 168 us; single weights are within noise either way)
++    if (env_g == 0 && tp <= 16 && N_launch / RQ_WAVE / R >= 4 * ggml_cuda_info().devices[ggml_cuda_get_device()].nsm) {
++        G = 1;
++    }
++    const int ngroups = steps / gsteps;
++    G = std::max(1, std::min(G, ngroups / W));
++    // whole groups per wave can make the longest wave longer than an even split of steps would; split K a little
++    // more until it is not (K = 5120 at G 64: 5 workgroups of 2 groups per wave, not 4 with up to 3)
++    const int G0 = G, even = (steps + W * G0 - 1) / (W * G0);
++    auto wave_steps = [&](int g) { return ((ngroups + g - 1) / g + W - 1) / W * gsteps; };
++    while (G > 1 && env_g == 0 && G < 2 * G0 && (G + 1) * W <= ngroups && wave_steps(G) > even) {
++        G++;
++    }
++    const int groups_per_wg = (ngroups + G - 1) / G;
++    G = (ngroups + groups_per_wg - 1) / groups_per_wg;
++    return { R, KA, W, G, groups_per_wg * gsteps * RQ_KW, groups };
 +}
 +
 +template <int T, int R>
-+static void rq_skinny_launch(const rq_skinny_shape & sh, const int32_t * ac, const int32_t * wt, int32_t * acc, int N, int Kw,
-+                             const rq_epi & epi, cudaStream_t stream) {
-+    rq_skinny_kernel<T, R><<<dim3(sh.groups, sh.G), RQ_WAVE * sh.W, rq_lds_bytes<T, R>(sh.W), stream>>>(ac, wt, acc, N, Kw, sh.kw_split, epi);
++static void rq_skinny_launch(const rq_skinny_shape & sh, const int32_t * ac, const rq_jobs & jobs, int Kw, cudaStream_t stream) {
++    int nblk = 0;
++    for (int i = 0; i < jobs.n; ++i) nblk += jobs.j[i].nblk;
++    rq_skinny_kernel<T, R><<<dim3(nblk, sh.G), RQ_WAVE * sh.W, rq_lds_bytes<T, R>(sh.W), stream>>>(ac, jobs, Kw, sh.kw_split);
 +}
 +
 +template <int T>
-+static void rq_skinny_launch_r(const rq_skinny_shape & sh, const int32_t * ac, const int32_t * wt, int32_t * acc, int N, int Kw,
-+                               const rq_epi & epi, cudaStream_t stream) {
++static void rq_skinny_launch_r(const rq_skinny_shape & sh, const int32_t * ac, const rq_jobs & jobs, int Kw, cudaStream_t stream) {
 +    constexpr int R0 = rq_cfg<T>::R;
-+    if (sh.R == 4)      rq_skinny_launch<T, R0 >= 4 ? 4 : 1>(sh, ac, wt, acc, N, Kw, epi, stream);
-+    else if (sh.R == 2) rq_skinny_launch<T, R0 >= 2 ? 2 : 1>(sh, ac, wt, acc, N, Kw, epi, stream);
-+    else                rq_skinny_launch<T, 1>(sh, ac, wt, acc, N, Kw, epi, stream);
++    if (sh.R == 4)      rq_skinny_launch<T, R0 >= 4 ? 4 : 1>(sh, ac, jobs, Kw, stream);
++    else if (sh.R == 2) rq_skinny_launch<T, R0 >= 2 ? 2 : 1>(sh, ac, jobs, Kw, stream);
++    else                rq_skinny_launch<T, 1>(sh, ac, jobs, Kw, stream);
 +}
 +
-+static void rq_skinny_dispatch(int tp, const rq_skinny_shape & sh, const int32_t * ac, const int32_t * wt, int32_t * acc, int N,
-+                               int Kw, const rq_epi & epi, cudaStream_t stream) {
++static void rq_skinny_dispatch(int tp, const rq_skinny_shape & sh, const int32_t * ac, const rq_jobs & jobs, int Kw, cudaStream_t stream) {
 +    switch (tp) {
-+        case 1:  rq_skinny_launch_r<1>(sh, ac, wt, acc, N, Kw, epi, stream);  break;
-+        case 2:  rq_skinny_launch_r<2>(sh, ac, wt, acc, N, Kw, epi, stream);  break;
-+        case 4:  rq_skinny_launch_r<4>(sh, ac, wt, acc, N, Kw, epi, stream);  break;
-+        case 8:  rq_skinny_launch_r<8>(sh, ac, wt, acc, N, Kw, epi, stream);  break;
-+        case 16: rq_skinny_launch_r<16>(sh, ac, wt, acc, N, Kw, epi, stream); break;
-+        case 24: rq_skinny_launch_r<24>(sh, ac, wt, acc, N, Kw, epi, stream); break;
-+        case 32: rq_skinny_launch_r<32>(sh, ac, wt, acc, N, Kw, epi, stream); break;
-+        case 48: rq_skinny_launch_r<48>(sh, ac, wt, acc, N, Kw, epi, stream); break;
-+        default: rq_skinny_launch_r<64>(sh, ac, wt, acc, N, Kw, epi, stream); break;
++        case 1:  rq_skinny_launch_r<1>(sh, ac, jobs, Kw, stream);  break;
++        case 2:  rq_skinny_launch_r<2>(sh, ac, jobs, Kw, stream);  break;
++        case 4:  rq_skinny_launch_r<4>(sh, ac, jobs, Kw, stream);  break;
++        case 8:  rq_skinny_launch_r<8>(sh, ac, jobs, Kw, stream);  break;
++        case 16: rq_skinny_launch_r<16>(sh, ac, jobs, Kw, stream); break;
++        case 24: rq_skinny_launch_r<24>(sh, ac, jobs, Kw, stream); break;
++        case 32: rq_skinny_launch_r<32>(sh, ac, jobs, Kw, stream); break;
++        case 48: rq_skinny_launch_r<48>(sh, ac, jobs, Kw, stream); break;
++        default: rq_skinny_launch_r<64>(sh, ac, jobs, Kw, stream); break;
 +    }
 +}
 +
++// every shape ggml_cuda_rq_w4a4_supported admits (N a multiple of the wave); activation groups have no other path
 +static bool rq_use_skinny(const ggml_tensor * src0) {
-+#if defined(GGML_USE_HIP)
 +    GGML_UNUSED(src0);
 +    return true;
-+#else
-+    static const bool env = getenv("RQ_SKINNY") && atoi(getenv("RQ_SKINNY"));
-+    return env && src0->ne[1] % RQ_WAVE == 0;
-+#endif
 +}
 +
 +bool ggml_cuda_rq_w4a4_ready(const ggml_tensor * src0) {
@@ -1104,7 +1281,8 @@ index 0000000..9b5d721
 +    int p, m;
 +    const bool shapes = (src0->type == GGML_TYPE_W4A4 || src0->type == GGML_TYPE_W4A4H) &&
 +           src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
-+           src0->ne[0] % QK_W4A4 == 0 && src0->ne[2] == 1 && src0->ne[3] == 1 &&
++           src0->ne[0] % QK_W4A4 == 0 && src0->ne[0] <= QK_W4A4 * RQ_MAX_BLOCKS && src0->ne[1] % RQ_WAVE == 0 &&
++           src0->ne[2] == 1 && src0->ne[3] == 1 &&
 +           src1->ne[2] == 1 && src1->ne[3] == 1 && ggml_is_contiguous(src0) &&
 +           src1->nb[0] == sizeof(float) && src1->nb[1] % 16 == 0 && dst->nb[0] == sizeof(float) &&
 +           (src0->type != GGML_TYPE_W4A4H || (rq_factor(src0->ne[0], p, m) && m <= 12288)); // FWHT chunk fits in 48 KiB
@@ -1112,120 +1290,322 @@ index 0000000..9b5d721
 +    GGML_UNUSED(cc); GGML_UNUSED(shapes);
 +    return false;
 +#elif defined(GGML_USE_HIP)
-+    return GGML_CUDA_CC_IS_AMD(cc) && shapes && src0->ne[1] % RQ_WAVE == 0;
++    return GGML_CUDA_CC_IS_AMD(cc) && shapes;
 +#else
-+    return GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_AMPERE && shapes;
++    return GGML_CUDA_CC_IS_NVIDIA(cc) && shapes;
 +#endif
 +}
++
++// The quantized activation of the last one-chunk skinny call, so the next W4A4 matmul of the same input (up after
++// gate, k and v after q, the DeltaNet gate after qkv) skips the Hadamard and the quantizer. The quantized layout
++// depends on the padded token count only (rq_skinny_plan's KA), not on N. An entry lives for one graph evaluation
++// of its context (ggml_cuda_rq_graph_begin), so reused graph tensors never hit stale data.
++static constexpr int RQ_CACHE_KW = 4096; // K <= 32768
++struct rq_act_cache {
++    uint64_t gen = 1, entry_gen = 0;
++    const ggml_tensor * src1 = nullptr;
++    const void * data = nullptr;
++    ggml_type type = GGML_TYPE_COUNT;
++    float clip = 0.0f;
++    int64_t rot = 0;
++    int64_t K = 0, M = 0;
++    int32_t * aq = nullptr; // [64 * RQ_CACHE_KW]
++    float * sa = nullptr;   // [64]
++    int32_t * mul = nullptr; // [RQ_MAX_GROUPS * 64]
++};
++
++static rq_act_cache & rq_cache_for(const ggml_backend_cuda_context & ctx) {
++    static std::mutex mutex;
++    static std::unordered_map<const ggml_backend_cuda_context *, rq_act_cache> caches;
++    std::lock_guard<std::mutex> lock(mutex);
++    return caches[&ctx];
++}
++
++void ggml_cuda_rq_graph_begin(ggml_backend_cuda_context & ctx) {
++    rq_cache_for(ctx).gen++;
++}
++
++#if !defined(GGML_USE_MUSA)
++// first use (never inside a graph capture, see ggml_cuda_rq_w4a4_ready): read the tensor's clip and Hadamard length
++static rq_tensor_info * rq_info(const ggml_tensor * src0, cudaStream_t stream) {
++    rq_tensor_info * info = (rq_tensor_info *) src0->extra;
++    if (info == nullptr) {
++        int32_t hdr[3] = { 0, 0, 0 }; // sum, pad[0], pad[1]
++        CUDA_CHECK(cudaMemcpyAsync(hdr, (const char *) src0->data + offsetof(block_w4a4, sum), sizeof(hdr),
++                                   cudaMemcpyDeviceToHost, stream));
++        CUDA_CHECK(cudaStreamSynchronize(stream));
++        float tclip;
++        memcpy(&tclip, &hdr[2], sizeof(tclip));
++        const int32_t rot = src0->type == GGML_TYPE_W4A4H ? (int32_t) ggml_rq_rot_check(hdr[1], src0->ne[0]) : 0;
++        const bool wg64 = ((uint32_t) hdr[0] >> 29) == 3u;
++        GGML_ASSERT(!wg64 || ggml_rq_act_group() == 64); // the fold takes one weight multiplier per activation group
++        info = new rq_tensor_info{ false, tclip, rot, wg64 };
++        const_cast<ggml_tensor *>(src0)->extra = info;
++    }
++    return info;
++}
++
++// the skinny layout [Wt codes | s_w | colsum], made in place on first use
++static void rq_repack_once(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, rq_tensor_info * info) {
++    if (info->repacked) {
++        return;
++    }
++    const int64_t K = src0->ne[0], N = src0->ne[1];
++    const int Kw = (int) (K / 8);
++    uint8_t * base = (uint8_t *) src0->data;
++    const size_t nbytes = ggml_nbytes(src0);
++    ggml_cuda_pool_alloc<uint8_t> tmp(ctx.pool(), nbytes);
++    CUDA_CHECK(cudaMemcpyAsync(tmp.get(), base, nbytes, cudaMemcpyDeviceToDevice, ctx.stream()));
++    const int64_t n_threads = N * Kw;
++    rq_repack_kernel<<<(n_threads + 255) / 256, 256, 0, ctx.stream()>>>(tmp.get(), (int32_t *) base, (float *) (base + N * K / 2),
++                                                                      (int) N, (int) K);
++    const int G = ggml_rq_act_group();
++    const int64_t n_sums = N * (K / G);
++    rq_colsum_kernel<<<(n_sums + 255) / 256, 256, 0, ctx.stream()>>>(tmp.get(), (int16_t *) (base + N * K / 2 + N * 4), (int) N, (int) K, G);
++    const int64_t n_wk = N * (K / 64);
++    rq_wk_kernel<<<(n_wk + 255) / 256, 256, 0, ctx.stream()>>>(tmp.get(), (int8_t *) (base + N * K / 2 + N * 4 + n_sums * 2), (int) N, (int) K);
++    CUDA_CHECK(cudaGetLastError());
++    info->repacked = true;
++}
++
++// dsts[i] = src0s[i] x src1 for n <= 3 weights of one type, K and clip (see ggml_cuda_rq_w4a4_can_fuse): one
++// activation transform and quantization, and on the skinny path one launch for all of them.
++static void rq_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * const * src0s, ggml_tensor * const * dsts, int n,
++                       const ggml_tensor * src1) {
++    const ggml_tensor * src0 = src0s[0];
++    ggml_tensor * dst = dsts[0];
++    const int64_t K = src0->ne[0], N = src0->ne[1], M = src1->ne[1];
++    cudaStream_t stream = ctx.stream();
++
++    const rq_tensor_info * info = rq_info(src0, stream);
++    const float clip = ggml_rq_act_clip_for(info->clip, src0->type == GGML_TYPE_W4A4H);
++    const int64_t n_rot = info->rot; // W4A4H: Hadamard blocks of n_rot along K
++
++    // tokens per skinny launch (a tile size of rq_skinny_tp; env RQ_CHUNK). 24, not 64: the 64-token tile spills (36
++    // VGPRs with ROCm 5.7's compiler, 77 with 7.2.4's) and 24-token launches cost less per token at every prefill
++    // shape (MI50 pp512: 219 -> 321 t/s on ROCm 5.7, 176 -> 333 on 7.2.4)
++    static const int chunk = getenv("RQ_CHUNK") ? rq_skinny_tp(atoi(getenv("RQ_CHUNK"))) : 24;
++    rq_act_cache * cache = nullptr; // set for one-chunk skinny calls, which share their quantized activation
++    bool hit = false;
++    if (rq_use_skinny(src0) && M <= chunk && K / 8 <= RQ_CACHE_KW) {
++        cache = &rq_cache_for(ctx);
++        hit = cache->entry_gen == cache->gen && cache->src1 == src1 && cache->data == src1->data &&
++              cache->type == src0->type && cache->clip == clip && cache->rot == n_rot && cache->K == K && cache->M == M;
++        if (cache->aq == nullptr) { // first use, never inside a graph capture (see ggml_cuda_rq_w4a4_ready)
++            CUDA_CHECK(cudaMalloc(&cache->aq, (size_t) 64 * RQ_CACHE_KW * sizeof(int32_t)));
++            CUDA_CHECK(cudaMalloc(&cache->sa, 64 * sizeof(float)));
++            CUDA_CHECK(cudaMalloc(&cache->mul, (size_t) RQ_MAX_GROUPS * 64 * sizeof(int32_t)));
++        }
++    }
++
++    const float * x = (const float *) src1->data;
++    int ldx = (int) (src1->nb[1] / sizeof(float));
++    ggml_cuda_pool_alloc<float> xh(ctx.pool()), xp(ctx.pool());
++    if (src0->type == GGML_TYPE_W4A4H && !hit) {
++        // block-diagonal: the M x K activation is M * (K / n_rot) rows of n_rot, each rotated as the CPU reference does
++        int p, m;
++        GGML_ASSERT(rq_factor(n_rot, p, m) && m <= 12288);
++        const int64_t Mr = M * (K / n_rot);
++        xh.alloc(M * K);
++        const float scale = 1.0f / sqrtf((float) n_rot); // same constant as the CPU reference
++        const int tf = std::min(m / 2, 512);
++        rq_fwht_kernel<<<dim3(M, K / m), std::max(tf, 32), m * sizeof(float), stream>>>(x, ldx, xh.get(), (int) K, m, p, scale);
++        if (p > 1) {
++            if (m % 64 == 0 && (p == 12 || p == 20 || p == 68)) {
++                xp.alloc(M * K);
++                const dim3 rows(Mr, m / 64, p / 4);
++                const uint32_t * masks = rq_paley_masks(p);
++                switch (p) {
++                    case 12: rq_paley_rows_kernel<12><<<rows, 256, 0, stream>>>(xh.get(), xp.get(), masks, (int) n_rot, m, scale); break;
++                    case 20: rq_paley_rows_kernel<20><<<rows, 256, 0, stream>>>(xh.get(), xp.get(), masks, (int) n_rot, m, scale); break;
++                    case 68: rq_paley_rows_kernel<68><<<rows, 256, 0, stream>>>(xh.get(), xp.get(), masks, (int) n_rot, m, scale); break;
++                }
++            } else {
++                rq_paley_kernel<<<dim3(Mr, (m + 127) / 128), 128, 0, stream>>>(xh.get(), (int) n_rot, m, p, scale);
++            }
++        }
++        x = xp.get() != nullptr ? xp.get() : xh.get();
++        ldx = (int) K;
++    }
++
++    if (rq_use_skinny(src0)) {
++        const int Kw = (int) (K / 8);
++        for (int i = 0; i < n; ++i) {
++            rq_repack_once(ctx, src0s[i], rq_info(src0s[i], stream));
++        }
++        const int G = ggml_rq_act_group();
++        // prefill widths: the tiled GEMM (rq-w4a4-gemm.cuh) over all tokens, quantized in one launch (env RQ_GEMM_MIN,
++        // 0 = skinny chunks only)
++        static const int gemm_min = getenv("RQ_GEMM_MIN") ? atoi(getenv("RQ_GEMM_MIN")) : 64;
++        bool gemm = cache == nullptr && gemm_min > 0 && M >= gemm_min;
++        for (int i = 0; i < n; ++i) {
++            gemm = gemm && src0s[i]->ne[1] % RQ_GEMM_BN == 0;
++        }
++        if (gemm) {
++            const int64_t Mp = (M + RQ_GEMM_BT - 1) / RQ_GEMM_BT * RQ_GEMM_BT;
++            const int gt = G / 64, nk = Kw / RQ_GEMM_KT;
++            // split K while the grid is under two workgroups per CU, keeping 16+ tiles per split
++            const int nsm = ggml_cuda_info().devices[ggml_cuda_get_device()].nsm;
++            std::vector<int> kz(n), nz(n);
++            size_t n_acc = 0, n_cnt = 0;
++            for (int i = 0; i < n; ++i) {
++                const int64_t wgs = src0s[i]->ne[1] / RQ_GEMM_BN * (Mp / RQ_GEMM_BT);
++                int s = 1;
++                while (wgs * s < 2 * nsm && nk / (2 * s) >= 16) s *= 2;
++                kz[i] = ((nk + s - 1) / s + gt - 1) / gt * gt;
++                nz[i] = (nk + kz[i] - 1) / kz[i];
++                if (nz[i] > 1) {
++                    n_acc += Mp * src0s[i]->ne[1];
++                    n_cnt += wgs;
++                }
++            }
++            ggml_cuda_pool_alloc<int32_t> aq(ctx.pool(), Mp * Kw);
++            ggml_cuda_pool_alloc<float>   sa(ctx.pool(), Mp);
++            ggml_cuda_pool_alloc<int32_t> mul(ctx.pool(), Mp * (K / G));
++            ggml_cuda_pool_alloc<int32_t> acc(ctx.pool(), std::max<size_t>(n_acc + n_cnt, 1)); // split-K sums, then counters
++            const int zero_blocks = (int) ((n_acc + n_cnt + RQ_QUANT_THREADS * 16 - 1) / (RQ_QUANT_THREADS * 16));
++            rq_quantize_act_kernel<<<M + zero_blocks, RQ_QUANT_THREADS, 0, stream>>>(x, ldx, (int) K, G, clip, aq.get(), sa.get(),
++                                                                                    mul.get(), (int) Mp, 0, acc.get(),
++                                                                                    (int64_t) (n_acc + n_cnt), (int) M);
++            int32_t * acc_i = acc.get(), * cnt_i = acc.get() + n_acc;
++            for (int i = 0; i < n; ++i) {
++                const int64_t Ni = src0s[i]->ne[1];
++                const uint8_t * base = (const uint8_t *) src0s[i]->data;
++                const size_t o_sw = Ni * K / 2, o_cs = o_sw + Ni * 4, o_wk = o_cs + Ni * (K / G) * 2;
++                const dim3 grid(Ni / RQ_GEMM_BN, Mp / RQ_GEMM_BT, nz[i]);
++                auto kernel = gt == 1 ? rq_gemm_kernel<0> : gt == 2 ? rq_gemm_kernel<1> : rq_gemm_kernel<2>;
++                kernel<<<grid, RQ_GEMM_THREADS, 0, stream>>>(
++                    aq.get(), mul.get(), sa.get(), (const int32_t *) base, (const float *) (base + o_sw),
++                    (const int16_t *) (base + o_cs), (const int8_t *) (base + o_wk), (float *) dsts[i]->data,
++                    (int) (dsts[i]->nb[1] / sizeof(float)), (int) Ni, (int) M, (int) Mp, Kw, kz[i], acc_i, cnt_i);
++                if (nz[i] > 1) {
++                    acc_i += Mp * Ni;
++                    cnt_i += Ni / RQ_GEMM_BN * (Mp / RQ_GEMM_BT);
++                }
++            }
++            CUDA_CHECK(cudaGetLastError());
++            return;
++        }
++        const int tp_max = rq_skinny_tp(std::min<int64_t>(M, chunk));
++        ggml_cuda_pool_alloc<int32_t> aq_pool(ctx.pool());
++        ggml_cuda_pool_alloc<float>   sa_pool(ctx.pool());
++        ggml_cuda_pool_alloc<int32_t> mul_pool(ctx.pool());
++        int32_t * aq = cache ? cache->aq : aq_pool.alloc((size_t) tp_max * Kw);
++        float   * sa = cache ? cache->sa : sa_pool.alloc(tp_max);
++        int32_t * mul = cache ? cache->mul : mul_pool.alloc((size_t) tp_max * (K / G));
++        size_t n_acc = 0;
++        for (int i = 0; i < n; ++i) {
++            n_acc += (size_t) tp_max * src0s[i]->ne[1] + src0s[i]->ne[1] / RQ_WAVE;
++        }
++        ggml_cuda_pool_alloc<int32_t> acc(ctx.pool(), n_acc); // per weight: split-K sums, then counters
++        for (int64_t m0 = 0; m0 < M; m0 += chunk) {
++            const int mc = (int) std::min<int64_t>(chunk, M - m0);
++            const int tp = rq_skinny_tp(mc);
++            int64_t N_launch = 0;
++            for (int i = 0; i < n; ++i) {
++                N_launch += src0s[i]->ne[1];
++            }
++            rq_skinny_shape sh = rq_skinny_plan(tp, (int) N, Kw, (int) N_launch, G / 32);
++            for (int i = 1; i < n; ++i) {
++                const rq_skinny_shape shi = rq_skinny_plan(tp, (int) src0s[i]->ne[1], Kw, (int) N_launch, G / 32);
++                if (shi.R < sh.R) { // one R for the launch
++                    sh = shi;
++                }
++            }
++            rq_jobs jobs = {};
++            jobs.n = n;
++            jobs.gsh = G == 64 ? 1 : G == 128 ? 2 : 3;
++            int64_t off = 0;
++            for (int i = 0; i < n; ++i) {
++                const int64_t Ni = src0s[i]->ne[1];
++                const uint8_t * base = (const uint8_t *) src0s[i]->data;
++                const int ldd = (int) (dsts[i]->nb[1] / sizeof(float));
++                const int groups = (int) (Ni / RQ_WAVE / sh.R);
++                int32_t * acc_i = acc.get() + off;
++                jobs.j[i] = { (const int32_t *) base, acc_i, (int) Ni, groups,
++                              { sa, mul, (const float *) (base + Ni * K / 2), (const int16_t *) (base + Ni * K / 2 + Ni * 4),
++                                (const int8_t *) (base + Ni * K / 2 + Ni * 4 + Ni * (K / G) * 2),
++                                (float *) dsts[i]->data + m0 * ldd, ldd, mc, acc_i + (size_t) mc * Ni } };
++                off += (int64_t) mc * Ni + groups;
++            }
++            for (int i = n; i < 3; ++i) {
++                jobs.j[i] = jobs.j[0];
++                jobs.j[i].nblk = 0;
++            }
++            const int64_t n_zero = sh.G > 1 ? off : 0;
++            const int zero_blocks = (int) ((n_zero + RQ_QUANT_THREADS * 16 - 1) / (RQ_QUANT_THREADS * 16));
++            if (!hit) {
++                rq_quantize_act_kernel<<<mc + zero_blocks, RQ_QUANT_THREADS, 0, stream>>>(x + m0 * ldx, ldx, (int) K, G, clip,
++                                                                           aq, sa, mul, tp, sh.KA, acc.get(), n_zero, mc);
++            } else if (zero_blocks > 0) { // reused activation: only clear the split-K sums and counters
++                rq_quantize_act_kernel<<<zero_blocks, RQ_QUANT_THREADS, 0, stream>>>(x, ldx, (int) K, G, clip,
++                                                                     aq, sa, mul, tp, sh.KA, acc.get(), n_zero, 0);
++            }
++            rq_skinny_dispatch(tp, sh, aq, jobs, Kw, stream);
++        }
++        if (cache && !hit) {
++            cache->entry_gen = cache->gen;
++            cache->src1 = src1;
++            cache->data = src1->data;
++            cache->type = src0->type;
++            cache->clip = clip;
++            cache->rot = n_rot;
++            cache->K = K;
++            cache->M = M;
++        }
++        CUDA_CHECK(cudaGetLastError());
++        return;
++    }
++    GGML_ABORT("ruquant W4A4: no path for this shape");
++}
++#endif // !GGML_USE_MUSA
 +
 +void ggml_cuda_mul_mat_rq_w4a4(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
 +#if defined(GGML_USE_MUSA)
 +    GGML_UNUSED(ctx); GGML_UNUSED(src0); GGML_UNUSED(src1); GGML_UNUSED(dst);
 +    GGML_ABORT("ruquant W4A4 is not available on this backend");
 +#else
-+    const int64_t K = src0->ne[0], N = src0->ne[1], M = src1->ne[1];
-+    cudaStream_t stream = ctx.stream();
-+
-+    const float * x = (const float *) src1->data;
-+    int ldx = (int) (src1->nb[1] / sizeof(float));
-+    ggml_cuda_pool_alloc<float> xh(ctx.pool());
-+    if (src0->type == GGML_TYPE_W4A4H) {
-+        int p, m;
-+        GGML_ASSERT(rq_factor(K, p, m));
-+        xh.alloc(M * K);
-+        const float scale = 1.0f / sqrtf((float) K); // same constant as the CPU reference
-+        const int tf = std::min(m / 2, 512);
-+        rq_fwht_kernel<<<dim3(M, p), std::max(tf, 32), m * sizeof(float), stream>>>(x, ldx, xh.get(), (int) K, m, p, scale);
-+        if (p > 1) {
-+            const dim3 tiles(M, m / 64);
-+            static const bool tile = getenv("RQ_PALEY_TILE") && atoi(getenv("RQ_PALEY_TILE"));
-+            const dim3 cols8(M, m / 8);
-+            switch (m % 64 == 0 ? p : 0) {
-+                case 12: tile ? rq_paley_tile_kernel<12><<<tiles, 256, 0, stream>>>(xh.get(), (int) K, m, scale)
-+                              : rq_paley_wide_kernel<12><<<cols8, 12 * 8, 0, stream>>>(xh.get(), (int) K, m, scale); break;
-+                case 20: tile ? rq_paley_tile_kernel<20><<<tiles, 256, 0, stream>>>(xh.get(), (int) K, m, scale)
-+                              : rq_paley_wide_kernel<20><<<cols8, 20 * 8, 0, stream>>>(xh.get(), (int) K, m, scale); break;
-+                case 68: tile ? rq_paley_tile_kernel<68><<<tiles, 256, 0, stream>>>(xh.get(), (int) K, m, scale)
-+                              : rq_paley_wide_kernel<68><<<cols8, 68 * 8, 0, stream>>>(xh.get(), (int) K, m, scale); break;
-+                default: rq_paley_kernel<<<dim3(M, (m + 127) / 128), 128, 0, stream>>>(xh.get(), (int) K, m, p, scale); break;
-+            }
-+        }
-+        x = xh.get();
-+        ldx = (int) K;
-+    }
-+    static const int search = getenv("RQ_ACT_SEARCH") ? atoi(getenv("RQ_ACT_SEARCH")) : 0;
-+    rq_tensor_info * info = (rq_tensor_info *) src0->extra;
-+    if (info == nullptr) { // first use (never inside a graph capture, see ggml_cuda_rq_w4a4_ready): read the tensor's clip
-+        float tclip = 0.0f;
-+        CUDA_CHECK(cudaMemcpyAsync(&tclip, (const char *) src0->data + offsetof(block_w4a4, pad) + sizeof(int32_t), sizeof(float),
-+                                   cudaMemcpyDeviceToHost, stream));
-+        CUDA_CHECK(cudaStreamSynchronize(stream));
-+        info = new rq_tensor_info{ false, tclip };
-+        const_cast<ggml_tensor *>(src0)->extra = info;
-+    }
-+    const float clip = ggml_rq_act_clip_for(info->clip, src0->type == GGML_TYPE_W4A4H);
-+
-+    if (rq_use_skinny(src0)) {
-+        const int Kw = (int) (K / 8);
-+        uint8_t * base = (uint8_t *) src0->data;
-+        if (!info->repacked) {
-+            const size_t nbytes = ggml_nbytes(src0);
-+            ggml_cuda_pool_alloc<uint8_t> tmp(ctx.pool(), nbytes);
-+            CUDA_CHECK(cudaMemcpyAsync(tmp.get(), base, nbytes, cudaMemcpyDeviceToDevice, stream));
-+            const int64_t n_threads = N * Kw;
-+            rq_repack_kernel<<<(n_threads + 255) / 256, 256, 0, stream>>>(tmp.get(), (int32_t *) base, (float *) (base + N * K / 2),
-+                                                                        (int32_t *) (base + N * K / 2 + N * 4), (int) N, (int) K);
-+            CUDA_CHECK(cudaGetLastError());
-+            info->repacked = true;
-+        }
-+        const int32_t * wt     = (const int32_t *) base;
-+        const float   * sw     = (const float *) (base + N * K / 2);
-+        const int32_t * colsum = (const int32_t *) (base + N * K / 2 + N * 4);
-+        const int tp_max = rq_skinny_tp(M);
-+        const int ldd = (int) (dst->nb[1] / sizeof(float));
-+        ggml_cuda_pool_alloc<int32_t> aq(ctx.pool(), (size_t) tp_max * Kw);
-+        ggml_cuda_pool_alloc<float>   sa(ctx.pool(), tp_max);
-+        ggml_cuda_pool_alloc<int32_t> za(ctx.pool(), tp_max);
-+        ggml_cuda_pool_alloc<int32_t> acc(ctx.pool(), (size_t) tp_max * N + N / RQ_WAVE); // split-K sums, then counters
-+        for (int64_t m0 = 0; m0 < M; m0 += 64) {
-+            const int mc = (int) std::min<int64_t>(64, M - m0);
-+            const int tp = rq_skinny_tp(mc);
-+            const rq_skinny_shape sh = rq_skinny_plan(tp, (int) N, Kw);
-+            int32_t * cnt = acc.get() + (size_t) mc * N;
-+            const int64_t n_zero = sh.G > 1 ? (int64_t) mc * N + sh.groups : 0;
-+            const int zero_blocks = (int) ((n_zero + RQ_QUANT_THREADS * 16 - 1) / (RQ_QUANT_THREADS * 16));
-+            rq_quantize_act_kernel<<<mc + zero_blocks, RQ_QUANT_THREADS, 0, stream>>>(x + m0 * ldx, ldx, (int) K, clip, search,
-+                                                                       aq.get(), sa.get(), za.get(), tp, sh.KA, acc.get(), n_zero, mc);
-+            const rq_epi epi = { sa.get(), za.get(), sw, colsum, (float *) dst->data + m0 * ldd, ldd, mc, cnt };
-+            rq_skinny_dispatch(tp, sh, aq.get(), wt, acc.get(), (int) N, Kw, epi, stream);
-+        }
-+        CUDA_CHECK(cudaGetLastError());
-+        return;
-+    }
-+
-+#if defined(GGML_USE_HIP)
-+    GGML_ABORT("ruquant W4A4: no HIP path for this shape");
-+#else
-+    ggml_cuda_pool_alloc<int32_t> aq(ctx.pool(), M * K / 8);
-+    ggml_cuda_pool_alloc<float>   sa(ctx.pool(), M);
-+    ggml_cuda_pool_alloc<int32_t> za(ctx.pool(), M);
-+    rq_quantize_act_kernel<<<M, RQ_QUANT_THREADS, 0, stream>>>(x, ldx, (int) K, clip, search, aq.get(), sa.get(), za.get(), 0, 0,
-+                                                              nullptr, 0, (int) M);
-+
-+    const dim3 grid((N + rq::BN - 1) / rq::BN, (M + rq::BM - 1) / rq::BM);
-+    rq::gemm_kernel<<<grid, rq::GEMM_THREADS, rq::SMEM_BYTES, stream>>>(
-+        aq.get(), (const uint8_t *) src0->data, sa.get(), za.get(), (float *) dst->data,
-+        (int) (dst->nb[1] / sizeof(float)), (int) M, (int) N, (int) K);
-+    CUDA_CHECK(cudaGetLastError());
++    rq_mul_mat(ctx, &src0, &dst, 1, src1);
 +#endif
++}
++
++bool ggml_cuda_rq_w4a4_can_fuse(const ggml_tensor * a, const ggml_tensor * b) {
++#if defined(GGML_USE_MUSA)
++    GGML_UNUSED(a); GGML_UNUSED(b);
++    return false;
++#else
++    const ggml_tensor * wa = a->src[0];
++    const ggml_tensor * wb = b->src[0];
++    const ggml_tensor * x  = a->src[1];
++    if (a->op != GGML_OP_MUL_MAT || b->op != GGML_OP_MUL_MAT || b->src[1] != x ||
++        (wa->type != GGML_TYPE_W4A4 && wa->type != GGML_TYPE_W4A4H) || wb->type != wa->type || wb->ne[0] != wa->ne[0] ||
++        x->type != GGML_TYPE_F32 || ggml_nrows(x) != x->ne[1] || x->ne[1] > 16 || // verify widths (fused prefill chunks were slower)
++        a->type != GGML_TYPE_F32 || b->type != GGML_TYPE_F32 || !rq_use_skinny(wa) || !rq_use_skinny(wb)) {
++        return false;
++    }
++    // both weights seen before: their first use reads the clip with a synchronize, so it stays unfused
++    const rq_tensor_info * ia = (const rq_tensor_info *) wa->extra;
++    const rq_tensor_info * ib = (const rq_tensor_info *) wb->extra;
++    return ia != nullptr && ib != nullptr && ia->clip == ib->clip && ia->rot == ib->rot;
++#endif
++}
++
++void ggml_cuda_mul_mat_rq_w4a4_fused(ggml_backend_cuda_context & ctx, const ggml_tensor * const * src0s, ggml_tensor * const * dsts,
++                                     int n, const ggml_tensor * src1) {
++#if defined(GGML_USE_MUSA)
++    GGML_UNUSED(ctx); GGML_UNUSED(src0s); GGML_UNUSED(dsts); GGML_UNUSED(n); GGML_UNUSED(src1);
++    GGML_ABORT("ruquant W4A4 is not available on this backend");
++#else
++    GGML_ASSERT(n >= 1 && n <= 3);
++    rq_mul_mat(ctx, src0s, dsts, n, src1);
 +#endif
 +}
 diff --git a/ggml/src/ggml-cuda/rq-w4a4.cuh b/ggml/src/ggml-cuda/rq-w4a4.cuh
 new file mode 100644
-index 0000000..7b0b9eb
+index 0000000..af559c2
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/rq-w4a4.cuh
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,15 @@
 +#include "common.cuh"
 +
 +// ruquant W4A4 / W4A4H matmul: optional online Hadamard, per-token int4 activation quantization,
@@ -1234,11 +1614,18 @@ index 0000000..7b0b9eb
 +// false while the weight still needs its one-time in-place repack (skinny path), which must not be captured in a graph
 +bool ggml_cuda_rq_w4a4_ready(const ggml_tensor * src0);
 +void ggml_cuda_mul_mat_rq_w4a4(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst);
++// b = W_b x can run in one launch with a = W_a x (same x, type, K and clip, skinny widths)
++bool ggml_cuda_rq_w4a4_can_fuse(const ggml_tensor * a, const ggml_tensor * b);
++// n <= 3 such matmuls (all can_fuse with the first) as one
++void ggml_cuda_mul_mat_rq_w4a4_fused(ggml_backend_cuda_context & ctx, const ggml_tensor * const * src0s, ggml_tensor * const * dsts,
++                                     int n, const ggml_tensor * src1);
++// starts a new graph evaluation of ctx: drops the shared quantized activation of the previous one
++void ggml_cuda_rq_graph_begin(ggml_backend_cuda_context & ctx);
 diff --git a/ggml/src/ggml-quants.c b/ggml/src/ggml-quants.c
-index 3586f67..728c4c2 100644
+index 3586f67..97f7984 100644
 --- a/ggml/src/ggml-quants.c
 +++ b/ggml/src/ggml-quants.c
-@@ -5394,6 +5394,258 @@ static bool validate_e_e8m0(uint8_t e, size_t i) {
+@@ -5394,6 +5394,387 @@ static bool validate_e_e8m0(uint8_t e, size_t i) {
          } \
      }
  
@@ -1319,6 +1706,8 @@ index 3586f67..728c4c2 100644
 +    for (int64_t i = 0; i < n; ++i) x[i] *= scale;
 +}
 +
++#define RQ_AG_M 255 // activation group multipliers are 1..RQ_AG_M (see rq_quantize_row_a)
++
 +static inline void rq_pack(block_w4a4 * GGML_RESTRICT y, const int8_t * GGML_RESTRICT codes, int64_t k, float d, int32_t sum) {
 +    for (int64_t b = 0; b < k / QK_W4A4; ++b) {
 +        y[b].d = d;
@@ -1338,18 +1727,17 @@ index 3586f67..728c4c2 100644
 +}
 +
 +// weights: symmetric codes in [-8, 7], scale = clip * amax / 7 with the clip ratio (1.0 down to 0.7 in
-+// 13 steps) that minimizes the row's squared rounding error
-+static void rq_quantize_row_w(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k) {
-+    GGML_ASSERT(k % QK_W4A4 == 0);
++// 13 steps) that minimizes the squared rounding error of the n values
++static float rq_scale_search(const float * GGML_RESTRICT x, int64_t n) {
 +    float amax = 0.0f;
-+    for (int64_t i = 0; i < k; ++i) amax = fmaxf(amax, fabsf(x[i]));
++    for (int64_t i = 0; i < n; ++i) amax = fmaxf(amax, fabsf(x[i]));
 +    float best_s = 0.0f;
 +    if (amax > 0.0f) {
 +        double best_err = INFINITY;
 +        for (int r = 0; r < 13; ++r) {
 +            const float s = amax * (1.0f - 0.025f * r) / 7.0f;
 +            double err = 0.0;
-+            for (int64_t i = 0; i < k; ++i) {
++            for (int64_t i = 0; i < n; ++i) {
 +                const float q = fminf(fmaxf(rintf(x[i] / s), -8.0f), 7.0f);
 +                const double e = (double) (q * s) - (double) x[i];
 +                err += e * e;
@@ -1357,13 +1745,59 @@ index 3586f67..728c4c2 100644
 +            if (err < best_err) { best_err = err; best_s = s; }
 +        }
 +    }
-+    int8_t * codes = (int8_t *) malloc(k);
-+    int32_t sum = 0;
-+    for (int64_t i = 0; i < k; ++i) {
-+        codes[i] = best_s > 0.0f ? (int8_t) fminf(fmaxf(rintf(x[i] / best_s), -8.0f), 7.0f) : 0;
-+        sum += codes[i];
++    return best_s;
++}
++
++// weight groups (RQ_WGROUP=1 or 64, for tests; models get them from ruquant convert --wgroups [64]): a scale per
++// block (or per 64 inputs) from the search, as an integer multiple k (1..15) of the row's unit, the largest / 15
++static int rq_wgroups(void) {
++    static int on = -1;
++    if (on < 0) {
++        const char * e = getenv("RQ_WGROUP");
++        on = e ? (atoi(e) == 64 ? 64 : atoi(e) > 0 ? QK_W4A4 : 0) : 0;
 +    }
-+    rq_pack(y, codes, k, best_s, sum);
++    return on;
++}
++
++// one scale per row, or with rq_wgroups() one per block
++static void rq_quantize_row_w(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k) {
++    GGML_ASSERT(k % QK_W4A4 == 0);
++    const int64_t nb = k / QK_W4A4;
++    int8_t * codes = (int8_t *) malloc(k);
++    if (!rq_wgroups()) {
++        const float s = rq_scale_search(x, k);
++        int32_t sum = 0;
++        for (int64_t i = 0; i < k; ++i) {
++            codes[i] = s > 0.0f ? (int8_t) fminf(fmaxf(rintf(x[i] / s), -8.0f), 7.0f) : 0;
++            sum += codes[i];
++        }
++        rq_pack(y, codes, k, s, sum);
++        free(codes);
++        return;
++    }
++    const int gs = rq_wgroups(), ng = (int) (k / gs);
++    float * sb = (float *) malloc(ng * sizeof(float));
++    int32_t * kb = (int32_t *) malloc(ng * sizeof(int32_t));
++    float smax = 0.0f;
++    for (int g = 0; g < ng; ++g) {
++        sb[g] = rq_scale_search(x + (int64_t) g*gs, gs);
++        smax = fmaxf(smax, sb[g]);
++    }
++    const float v = smax / 15.0f;
++    for (int g = 0; g < ng; ++g) {
++        kb[g] = v > 0.0f ? (int32_t) fminf(fmaxf(rintf(sb[g] / v), 1.0f), 15.0f) : 1;
++        const float s = (float) kb[g] * v;
++        for (int i = 0; i < gs; ++i) {
++            codes[(int64_t) g*gs + i] = s > 0.0f ? (int8_t) fminf(fmaxf(rintf(x[(int64_t) g*gs + i] / s), -8.0f), 7.0f) : 0;
++        }
++    }
++    rq_pack(y, codes, k, v, 0);
++    for (int64_t b = 0; b < nb; ++b) {
++        y[b].sum = gs == QK_W4A4 ? 1 << 30 | kb[b]
++                                 : 3 << 29 | kb[4*b] | kb[4*b + 1] << 4 | kb[4*b + 2] << 8 | kb[4*b + 3] << 12;
++    }
++    free(kb);
++    free(sb);
 +    free(codes);
 +}
 +
@@ -1393,36 +1827,107 @@ index 3586f67..728c4c2 100644
 +    return c;
 +}
 +
-+// activations, the spec's per-token asymmetric quantizer: range [min(x,0), max(x,0)] * clip, 15 steps
++int64_t ggml_rq_tensor_rot(const void * blocks, int64_t k) {
++    return ggml_rq_rot_check(((const block_w4a4 *) blocks)->pad[0], k);
++}
++
++int64_t ggml_rq_rot_check(int32_t n, int64_t k) {
++    int p, m;
++    if (n <= 0 || k % n != 0 || !ggml_rq_hadamard_factor(n, &p, &m)) {
++        // a model whose online Hadamard spans the whole row, split along K (-sm tensor): reconvert with --rot-blocks
++        GGML_ABORT("W4A4H: Hadamard length %d does not divide this row slice of %lld (ruquant convert --rot-blocks)",
++                   (int) n, (long long) k);
++    }
++    return n;
++}
++
++// activation group size: 64, or 128 / 256 with RQ_ACT_GROUP for experiments. Every backend reads it here.
++int ggml_rq_act_group(void) {
++    static int g = 0;
++    if (g == 0) {
++        const char * e = getenv("RQ_ACT_GROUP");
++        const int v = e ? atoi(e) : 64;
++        g = v == 128 || v == 256 ? v : 64;
++    }
++    return g;
++}
++
++// activations: per token, asymmetric, a scale and zero point per group of G = ggml_rq_act_group() values. Group g's
++// range is [min(x,0), max(x,0)] * clip. The token's widest range R sets a unit u = R / (15 * RQ_AG_M); group g's
++// scale is the smallest integer multiple m_g * u (m_g in 1..RQ_AG_M) covering its range. A block (256 values, S =
++// 256 / G groups) stores u in d, the zero points in sum (4 bits per group, log2(S) in bits 16..17), the multipliers
++// in pad[0] (8 bits per group) and the row length in pad[1]; codes are q - 8. The dot product stays an exact
++// integer: sum_g m_g * (acc_g + (8 - z_g) * colsum_g), times u, times s_w.
 +static void rq_quantize_row_a(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k, float clip) {
 +    GGML_ASSERT(k % QK_W4A4 == 0);
-+    float mn = 0.0f, mx = 0.0f;
-+    for (int64_t i = 0; i < k; ++i) { mn = fminf(mn, x[i]); mx = fmaxf(mx, x[i]); }
-+    mn *= clip;
-+    mx *= clip;
-+    if (mn == 0.0f && mx == 0.0f) { mn = -1.0f; mx = 1.0f; }
-+    const float scale = (mx - mn) / 15.0f;
-+    const float inv = 1.0f / scale;
-+    const float zf = fminf(fmaxf(rintf(-mn * inv), 0.0f), 15.0f);
-+    int8_t * codes = (int8_t *) malloc(k);
-+    for (int64_t i = 0; i < k; ++i) {
-+        const float q = fminf(fmaxf(rintf(x[i] * inv) + zf, 0.0f), 15.0f);
-+        codes[i] = (int8_t) ((int) q - 8);
++    const int G = ggml_rq_act_group(), lsub = G == 64 ? 2 : G == 128 ? 1 : 0;
++    const int64_t ng = k / G;
++    float * lo = (float *) malloc(ng * 2 * sizeof(float));
++    float * hi = lo + ng;
++    float R = 0.0f;
++    for (int64_t g = 0; g < ng; ++g) {
++        float mn = 0.0f, mx = 0.0f;
++        for (int i = 0; i < G; ++i) { mn = fminf(mn, x[g*G + i]); mx = fmaxf(mx, x[g*G + i]); }
++        lo[g] = mn * clip;
++        hi[g] = mx * clip;
++        R = fmaxf(R, hi[g] - lo[g]);
 +    }
-+    rq_pack(y, codes, k, scale, (int32_t) zf);
-+    free(codes);
++    if (R == 0.0f) R = 2.0f;
++    const float u = R / (15.0f * RQ_AG_M);
++    for (int64_t b = 0; b < k / QK_W4A4; ++b) {
++        y[b].d = u;
++        y[b].sum = lsub << 16;
++        y[b].pad[0] = 0;
++        y[b].pad[1] = (int32_t) k;
++    }
++    for (int64_t g = 0; g < ng; ++g) {
++        const int m = (int) fminf(fmaxf(ceilf(((hi[g] - lo[g]) * (float) RQ_AG_M) / R), 1.0f), (float) RQ_AG_M);
++        const float inv = 1.0f / ((float) m * u);
++        const float zf = fminf(fmaxf(rintf(-lo[g] * inv), 0.0f), 15.0f);
++        block_w4a4 * yb = &y[g*G / QK_W4A4];
++        const int sg = (int) (g % (QK_W4A4 / G));
++        yb->sum |= (int32_t) zf << (4*sg);
++        yb->pad[0] = (int32_t) ((uint32_t) yb->pad[0] | (uint32_t) m << (8*sg));
++        for (int w = sg*G/8; w < (sg + 1)*G/8; ++w) {
++            uint32_t word = 0;
++            for (int j = 0; j < 8; ++j) {
++                const float q = fminf(fmaxf(rintf(x[(g - sg)*G + 8*w + j] * inv) + zf, 0.0f), 15.0f);
++                word |= (uint32_t) (((int) q - 8) & 0xF) << (4*j);
++            }
++            yb->qs[w] = word;
++        }
++    }
++    free(lo);
 +}
 +
 +void quantize_row_w4a4_ref(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k) {
 +    rq_quantize_row_w(x, y, k);
 +}
 +
++// Hadamard blocks per W4A4H row (RQ_ROT_BLOCKS, for tests; models get them from ruquant convert --rot-blocks): the
++// online rotation is block-diagonal, k / blocks wide, so a tensor-parallel split of K keeps whole blocks per device
++static int64_t rq_rot_len(int64_t k) {
++    static int blocks = 0;
++    if (blocks == 0) {
++        const char * e = getenv("RQ_ROT_BLOCKS");
++        blocks = e && atoi(e) > 1 ? atoi(e) : 1;
++    }
++    return k % blocks == 0 ? k / blocks : k;
++}
++
++// x <- x diag(H_n, H_n, ...), each H_n as ggml_rq_hadamard
++static void rq_hadamard_blocks(float * GGML_RESTRICT x, int64_t k, int64_t n, bool transpose) {
++    for (int64_t off = 0; off < k; off += n) ggml_rq_hadamard(x + off, n, transpose);
++}
++
 +void quantize_row_w4a4h_ref(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k) {
-+    // stores Q(W H): the activations get x H at run time, and (x H)(W H)^T = x W^T
++    // stores Q(W H): the activations get x H at run time, and (x H)(W H)^T = x W^T; the Hadamard length is in pad[0]
++    const int64_t n = rq_rot_len(k);
 +    float * t = (float *) malloc(k * sizeof(float));
 +    memcpy(t, x, k * sizeof(float));
-+    ggml_rq_hadamard(t, k, false);
++    rq_hadamard_blocks(t, k, n, false);
 +    rq_quantize_row_w(t, y, k);
++    for (int64_t b = 0; b < k / QK_W4A4; ++b) y[b].pad[0] = (int32_t) n;
 +    free(t);
 +}
 +
@@ -1439,29 +1944,40 @@ index 3586f67..728c4c2 100644
 +}
 +
 +void quantize_row_a4h_clip(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k, float clip) {
++    quantize_row_a4h_clip_n(x, y, k, clip, k);
++}
++
++void quantize_row_a4h_clip_n(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k, float clip, int64_t n) {
++    GGML_ASSERT(n > 0 && k % n == 0);
 +    float * t = (float *) malloc(k * sizeof(float));
 +    memcpy(t, x, k * sizeof(float));
-+    ggml_rq_hadamard(t, k, false);
++    rq_hadamard_blocks(t, k, n, false);
 +    rq_quantize_row_a(t, y, k, clip);
++    for (int64_t b = 0; b < k / QK_W4A4; ++b) y[b].pad[1] = (int32_t) n;
 +    free(t);
 +}
 +
 +void dequantize_row_w4a4(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
 +    for (int64_t b = 0; b < k / QK_W4A4; ++b)
 +        for (int w = 0; w < QK_W4A4 / 8; ++w)
-+            for (int j = 0; j < 8; ++j) y[b*QK_W4A4 + 8*w + j] = rq_code(x[b].qs[w], j) * x[b].d;
++            for (int j = 0; j < 8; ++j) y[b*QK_W4A4 + 8*w + j] = rq_code(x[b].qs[w], j) * ((float) RQ_W_MULT_G(x[b].sum, w / 8) * x[b].d);
 +}
 +
 +void dequantize_row_a4(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
 +    for (int64_t b = 0; b < k / QK_W4A4; ++b)
 +        for (int w = 0; w < QK_W4A4 / 8; ++w)
-+            for (int j = 0; j < 8; ++j) y[b*QK_W4A4 + 8*w + j] = (rq_code(x[b].qs[w], j) + 8 - x[b].sum) * x[b].d;
++            for (int j = 0; j < 8; ++j) {
++                const int sg = (8*w) >> (8 - ((x[b].sum >> 16) & 3)); // group in the block
++                const int z = (x[b].sum >> (4*sg)) & 0xF, m = (int) (((uint32_t) x[b].pad[0] >> (8*sg)) & 0xFF);
++                y[b*QK_W4A4 + 8*w + j] = (rq_code(x[b].qs[w], j) + 8 - z) * ((float) m * x[b].d);
++            }
 +}
 +
-+// back to the original basis, one row (of length pad[0]) at a time
-+static void rq_unrotate(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
++// back to the original basis, one row at a time; the row length is in pad[len] (pad[0] for weights, pad[1] for
++// activations)
++static void rq_unrotate(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k, int len) {
 +    for (int64_t off = 0; off < k; ) {
-+        const int64_t n = x[off / QK_W4A4].pad[0];
++        const int64_t n = x[off / QK_W4A4].pad[len];
 +        GGML_ASSERT(n > 0 && off + n <= k);
 +        ggml_rq_hadamard(y + off, n, true);
 +        off += n;
@@ -1470,12 +1986,12 @@ index 3586f67..728c4c2 100644
 +
 +void dequantize_row_w4a4h(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
 +    dequantize_row_w4a4(x, y, k);
-+    rq_unrotate(x, y, k);
++    rq_unrotate(x, y, k, 0);
 +}
 +
 +void dequantize_row_a4h(const block_w4a4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
 +    dequantize_row_a4(x, y, k);
-+    rq_unrotate(x, y, k);
++    rq_unrotate(x, y, k, 1);
 +}
 +
 +size_t quantize_w4a4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix) {
@@ -1497,7 +2013,7 @@ index 3586f67..728c4c2 100644
  bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbytes) {
      if (type < 0 || type >= GGML_TYPE_COUNT) {
          fprintf(stderr, "%s: invalid type %d\n", __func__, type);
-@@ -5541,6 +5793,19 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
+@@ -5541,6 +5922,19 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
              {
                  VALIDATE_ROW_DATA_DM_F16_IMPL(block_q5_1, data, nb, d, m);
              } break;
@@ -1518,10 +2034,10 @@ index 3586f67..728c4c2 100644
              {
                  VALIDATE_ROW_DATA_D_F16_IMPL(block_q8_0, data, nb);
 diff --git a/ggml/src/ggml-quants.h b/ggml/src/ggml-quants.h
-index ca36d13..ce370d2 100644
+index ca36d13..9d7de6c 100644
 --- a/ggml/src/ggml-quants.h
 +++ b/ggml/src/ggml-quants.h
-@@ -21,6 +21,22 @@ GGML_API void quantize_row_q4_1_ref(const float * GGML_RESTRICT x, block_q4_1 *
+@@ -21,6 +21,28 @@ GGML_API void quantize_row_q4_1_ref(const float * GGML_RESTRICT x, block_q4_1 *
  GGML_API void quantize_row_q5_0_ref(const float * GGML_RESTRICT x, block_q5_0 * GGML_RESTRICT y, int64_t k);
  GGML_API void quantize_row_q5_1_ref(const float * GGML_RESTRICT x, block_q5_1 * GGML_RESTRICT y, int64_t k);
  GGML_API void quantize_row_q8_0_ref(const float * GGML_RESTRICT x, block_q8_0 * GGML_RESTRICT y, int64_t k);
@@ -1532,10 +2048,16 @@ index ca36d13..ce370d2 100644
 +// backend gets the same bits.
 +GGML_API bool ggml_rq_hadamard_factor(int64_t n, int * p, int * m);
 +GGML_API float ggml_rq_act_clip(bool hadamard);
++GGML_API int   ggml_rq_act_group(void); // activation scale group: 64, or RQ_ACT_GROUP = 128 / 256
 +GGML_API float ggml_rq_act_clip_for(float tensor_clip, bool hadamard); // env, else the tensor's, else 1
 +GGML_API float ggml_rq_tensor_clip(const void * blocks);               // a W4A4 tensor's clip (block 0 header)
++// a W4A4H tensor's Hadamard length (block 0 header pad[0]; the rotation is block-diagonal), checked against a row
++// (slice) of k: aborts unless it divides k and factors
++GGML_API int64_t ggml_rq_tensor_rot(const void * blocks, int64_t k);
++GGML_API int64_t ggml_rq_rot_check(int32_t n, int64_t k);
 +GGML_API void quantize_row_a4_clip (const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k, float clip);
 +GGML_API void quantize_row_a4h_clip(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k, float clip);
++GGML_API void quantize_row_a4h_clip_n(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k, float clip, int64_t n);
 +GGML_API void ggml_rq_hadamard(float * GGML_RESTRICT x, int64_t n, bool transpose);
 +GGML_API void quantize_row_w4a4_ref (const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k);
 +GGML_API void quantize_row_w4a4h_ref(const float * GGML_RESTRICT x, block_w4a4 * GGML_RESTRICT y, int64_t k);
@@ -1544,7 +2066,7 @@ index ca36d13..ce370d2 100644
  GGML_API void quantize_row_q8_1_ref(const float * GGML_RESTRICT x, block_q8_1 * GGML_RESTRICT y, int64_t k);
  
  GGML_API void quantize_row_mxfp4_ref(const float * GGML_RESTRICT x, block_mxfp4 * GGML_RESTRICT y, int64_t k);
-@@ -51,6 +67,10 @@ GGML_API void dequantize_row_q4_1(const block_q4_1 * GGML_RESTRICT x, float * GG
+@@ -51,6 +73,10 @@ GGML_API void dequantize_row_q4_1(const block_q4_1 * GGML_RESTRICT x, float * GG
  GGML_API void dequantize_row_q5_0(const block_q5_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
  GGML_API void dequantize_row_q5_1(const block_q5_1 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
  GGML_API void dequantize_row_q8_0(const block_q8_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
@@ -1555,7 +2077,7 @@ index ca36d13..ce370d2 100644
  //GGML_API void dequantize_row_q8_1(const block_q8_1 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
  
  GGML_API void dequantize_row_mxfp4(const block_mxfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
-@@ -103,6 +123,8 @@ GGML_API size_t quantize_q4_1(const float * GGML_RESTRICT src, void * GGML_RESTR
+@@ -103,6 +129,8 @@ GGML_API size_t quantize_q4_1(const float * GGML_RESTRICT src, void * GGML_RESTR
  GGML_API size_t quantize_q5_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
  GGML_API size_t quantize_q5_1(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
  GGML_API size_t quantize_q8_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
@@ -1617,7 +2139,7 @@ index e00f8e2..11963d4 100644
          case GGML_TYPE_NVFP4:   result = quantize_nvfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
          case GGML_TYPE_F8_E4M3: result = quantize_f8_e4m3(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index e4ebd7c..ccdbe18 100644
+index e4ebd7c..ca8451c 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
 @@ -5414,6 +5414,9 @@ struct test_mul_mat : public test_case {
@@ -1630,7 +2152,59 @@ index e4ebd7c..ccdbe18 100644
          return max_nmse_err();
      }
  
-@@ -11196,6 +11199,25 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -5517,6 +5520,51 @@ struct test_mul_mat : public test_case {
+         return out;
+     }
+ 
++    // ruquant W4A4: activations whose 64-wide groups differ in scale (x1/8 .. x8, times a per-token factor), so the
++    // activation group multipliers are exercised, and weights whose 64-wide groups do (x1/4 .. x4, for RQ_WGROUP=1 and
++    // RQ_WGROUP=64, whose four multipliers per block then differ). Every
++    // 7th weight row is flat (+-1) and, for W4A4, every 5th token takes weight row 0's signs: aligned flat rows, like
++    // a rotated massive activation, whose dot product passes 2^31 in the kernels' integer units at K = 17408.
++    void initialize_tensors(ggml_context * ctx) override {
++        test_case::initialize_tensors(ctx);
++        if (type_a != GGML_TYPE_W4A4 && type_a != GGML_TYPE_W4A4H) {
++            return;
++        }
++        std::vector<float> w;
++        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
++            if (strcmp(t->name, "a") == 0 && t->type == type_a && ggml_is_contiguous(t)) {
++                const int64_t n = t->ne[0], rows = ggml_nrows(t);
++                w.resize(n * rows);
++                std::mt19937 rng(1234);
++                std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
++                for (int64_t r = 0; r < rows; ++r) {
++                    for (int64_t i = 0; i < n; ++i) {
++                        const float v = dist(rng);
++                        w[r * n + i] = r % 7 == 0 ? (v < 0.0f ? -1.0f : 1.0f) : v * exp2f((float) ((i / 64 + r) % 5 - 2));
++                    }
++                }
++                std::vector<uint8_t> q(ggml_nbytes(t));
++                ggml_quantize_chunk(t->type, w.data(), q.data(), 0, rows, n, nullptr);
++                ggml_backend_tensor_set(t, q.data(), 0, q.size());
++            }
++        }
++        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
++            if (strcmp(t->name, "b") != 0 || t->type != GGML_TYPE_F32 || !ggml_is_contiguous(t)) {
++                continue;
++            }
++            std::vector<float> v(ggml_nelements(t));
++            ggml_backend_tensor_get(t, v.data(), 0, ggml_nbytes(t));
++            for (int64_t r = 0; r < ggml_nrows(t); ++r) {
++                for (int64_t i = 0; i < t->ne[0]; ++i) {
++                    const bool aligned = type_a == GGML_TYPE_W4A4 && r % 5 == 0 && (int64_t) w.size() >= t->ne[0];
++                    v[r * t->ne[0] + i] = aligned ? (w[i] < 0.0f ? -1.0f : 1.0f)
++                                                  : v[r * t->ne[0] + i] * exp2f((float) ((i / 64) % 7 - 3) + (float) (r % 3 - 1));
++                }
++            }
++            ggml_backend_tensor_set(t, v.data(), 0, ggml_nbytes(t));
++        }
++    }
++
+     bool run_whole_graph() override { return o > 1; }
+ 
+     std::string op_desc(ggml_tensor * t) override {
+@@ -11196,6 +11244,25 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8192, 512, 5120, {128, 1}, {1, 1}));
  #endif
  
