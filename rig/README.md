@@ -58,6 +58,9 @@ rig/final_mi50.sh MODEL DRAFTER    # the final table (RESULTS.md): 1 GPU / TP2 /
 rig/same_tokens.sh MODEL GPUS EXTRA  # hash of a greedy completion: a change must keep it byte for byte
 python3 rig/tp_breakdown.py ONE.csv TP2.csv TP4.csv   # prefill kernel time per category, 1 GPU vs TP (rocprof traces)
 python3 rig/draft_breakdown.py results.csv            # a one-GPU DFlash2 trace split into target / draft / inject graphs
+rig/therock/setup.sh                # on the box: AMD TheRock ROCm 7.12 (gfx90X nightly, RCCL with gfx906) in ~/therock-7.12 + build-r712
+rig/therock/build_local.sh MX HOST  # the same build on a workstation in an Ubuntu 22.04 container (85 s on 32 threads), shipped to the box
+rig/rocm72/setup.sh                 # AMD's packaged ROCm 7.2.4 in user space + build-r72 (no RCCL: its rccl has no gfx906 code)
 ggml_bench --types w4a4,q4_0 --lm q6_K,q8_0 --widths 1,6,8 | python3 rig/bench_summary.py
 ```
 

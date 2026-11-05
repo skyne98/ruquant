@@ -55,6 +55,8 @@ finally:
 
 # the server prints one "acc per pos" line per request, in order
 log_text = open(log.name).read()
+if os.environ.get("KEEP_LOG"):  # a copy of the server log, e.g. to read its token-graph lines
+    open(os.environ["KEEP_LOG"], "w").write(log_text)
 per_pos = [[float(x) for x in m.group(1).split(",")]
            for m in re.finditer(r"acc per pos = \(([^)]*)\)", log_text)]
 os.unlink(log.name)

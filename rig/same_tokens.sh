@@ -1,9 +1,9 @@
 #!/bin/bash
 # Greedy completion through llama-server; prints a hash of the generated text, to check that a change keeps the
-# output byte for byte (env passes through, e.g. RQ_FUSE_HADAMARD=0):
+# output byte for byte (env passes through, e.g. RQ_FUSE_HADAMARD=0; BIN and ROCM_LIB pick the build):
 #   rig/same_tokens.sh MODEL GPUS "EXTRA"      e.g. rig/same_tokens.sh ~/models/m.gguf 0,1,2,3 "-sm tensor"
 bin=${BIN:-$HOME/mx-llama.cpp/build/bin}
-export LD_LIBRARY_PATH=$bin:/opt/rocm/lib
+export LD_LIBRARY_PATH=$bin:${ROCM_LIB:-/opt/rocm/lib}
 log=$(mktemp)
 HIP_VISIBLE_DEVICES=$2 "$bin/llama-server" -m "$1" -ngl 99 -fa 1 -c 4096 -np 1 --port 8095 --host 127.0.0.1 --no-webui \
     --cache-ram 0 $3 > "$log" 2>&1 &

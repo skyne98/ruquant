@@ -6,6 +6,8 @@
 # the ROCm 5.7 fixes (relaxed 6.1 gate, hipStreamWaitEvent default argument, duplicate bf16 host symbols).
 # Run the binaries with GGML_CUDA_DISABLE_GRAPHS=1 on ROCm 5.7 (graphs are slower there). Models carry their own
 # activation clips (RQ_ACT_CLIP / RQ_ACT_CLIP_H override them). Full runtime settings: RESULTS.md.
+# This builds against the box's ROCm 5.7 (the fallback); the default runtime is ROCm 7.12 from AMD's TheRock,
+# rig/therock/setup.sh (or rig/therock/build_local.sh on a workstation).
 # RCCL (GGML_HIP_RCCL, needs ROCm's librccl): under -sm tensor, prefill-sized all-reduces go to RCCL and decode-sized
 # ones stay on the custom peer-write kernel; TP = 4 prefill +17-19% on box 1 with RCCL's f16 ring.
 # Prefill all-reduces (>= 262144 values) go as q4_K blocks by default (all-gather of partials at TP2, reduce-scatter +

@@ -1,5 +1,8 @@
 #!/bin/bash
-# A user-space ROCm 7.2.4 next to the box's /opt/rocm (no root), and mx-llama.cpp built against it in build-r72.
+# A user-space ROCm 7.2.4 next to the box's /opt/rocm (no root), and mx-llama.cpp built against it in build-r72. Run it
+# with GGML_META_TOKEN_GRAPH=1 and without GGML_CUDA_DISABLE_GRAPHS: whole-token HIP graphs pay on 7.2.4
+# (REPORT-2026-11-02.md, "token graphs on ROCm 7.2.4"). No RCCL: AMD's rccl 7.2.4 has no gfx906 code objects (its
+# first collective segfaults on an MI50), so TP prefill all-reduces use the custom kernel and TP prefill is ~35% slower.
 #   rig/rocm72/setup.sh    (run on the box from the ruquant checkout; needs ~3 GB, plus ~2 GB for the build)
 # rocBLAS 7.2.4 ships no gfx906 kernels (6.4 dropped them), so its Tensile library dir gets the gfx906 files of
 # rocBLAS 6.3.3, which 7.2.4 loads fine (5.7's files segfault in loadPlaceholderLibrary). hipBLASLt and rocSOLVER are
