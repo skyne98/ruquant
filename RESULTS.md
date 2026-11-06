@@ -192,8 +192,31 @@ export GGML_META_SPIN=2000000         # TP lane threads spin instead of sleeping
 
 **Not used:**
 - AMD's packaged ROCm 7.2.4 (`rig/rocm72/setup.sh`): its RCCL has no gfx906 code, so TP prefill is 35-38% slower.
-- ROCm 10.1 from mixa3607/ML-gfx906: it needs glibc 2.38, and it is a third-party binary source.
-- Details: REPORT-2026-11-02.md, "whole-token HIP graphs on ROCm 7.2.4".
+- ROCm 10.1 from mixa3607/ML-gfx906 (`rig/rocm101/build_local.sh`; Ubuntu 24.04 container build, a private glibc on
+  the box): the same tokens and KLD as 7.12, but 1-2% slower. TP4 DFlash2 is 111.3 against 113.6 t/s, and TP4 pp2048
+  1360 against 1386.
+  - Its RCCL and rocBLAS keep their gfx906 code in `.kpack` files next to `lib`; without them TP prefill collapses.
+- Details: REPORT-2026-11-02.md, "whole-token HIP graphs on ROCm 7.2.4" and "ROCm 10.1 from mixa3607's gfx906
+  packages".
+
+## Long context (box 1, 2026-11-06, local fork build)
+
+At 64k tokens the cost is attention in the 16 full-attention layers. The DeltaNet layers cost the same at any depth,
+and the drafter attends over a 4096-token window. On the published build with an f16 cache, a DFlash2 step at 64k
+takes 79-80 ms on one GPU (51 ms with a short prompt), 57-59 on TP2 (42-44) and 44-48 on TP4 (36-38). A 64k prefill
+takes 243 / 134 / 84 s.
+
+**`-ctk q4_0 -ctv q4_0`** turns on the fork's own attention over a 4-bit cache (`rq-fattn.cu`). It uses the rotated
+q4_0 nibbles straight into `v_dot8` for Q·K and f16 dot2 for P·V, for decode and the verify.
+- On one GPU at 64k it takes the DFlash2 step to 71-72 ms (-11%), the verify forward from 64.4 to 59.6 ms, and decode
+  from 44.7 to 38.5 ms.
+- TP4 steps are unchanged.
+- The cache shrinks from 4.35 to 1.2 GB.
+- KLD stays within noise of the f16 cache: 0.0423 against 0.0416, 16 chunks at verify width.
+- llama.cpp's own q4_0 / q8_0 attention is slower than f16 on gfx906 at depth (decode 3× slower with q4_0).
+
+This is in the local fork tree and `patches/`, not in the published fork commit. Details: REPORT-2026-11-02.md, "64k
+context", "quantized KV cache on our model" and "our q4 KV attention with v_dot8".
 
 ## Methodology
 
@@ -246,12 +269,14 @@ Measured, then dropped; numbers and causes are in the reports:
 |---|---|
 | HIP graphs on ROCm 5.7 (single GPU and the TP token graph) | slower and unstable (TP4 T=8: 200 ± 40 t/s vs ~285 without); on ROCm 7.12 they pay (above) |
 | AMD's packaged ROCm 7.2.4 | graphs pay (TP4 +6%), but its RCCL has no gfx906 code: TP prefill -35-38% |
+| ROCm 10.1 (mixa3607's gfx906 TheRock packages) | same tokens and KLD as 7.12, 1-2% slower (TP4 DFlash2 111.3 vs 113.6 t/s, 1 GPU 80.8 vs 84.2) |
 | drafter replicated on all GPUs / split TP4 | -19% / -24% (mx's multi-GPU wrapper: ~2 ms graph build and 5.7-7.3 ms enqueue per drafter graph) |
 | draft length 5 / 6 at TP4 | -6% / -4% |
 | `NCCL_P2P_LEVEL=SYS` for prefill all-reduces | slower (TP4 pp512 882 -> 723) |
 | bf16 TP all-reduce payload | KLD +4% and lower acceptance; f16 kept |
 | TP lanes free-running (one host join per forward) | no change: the TP4 verify is GPU-bound |
 | no split-K at TP4 (benchmark said faster) | 292 -> 288 t/s in the forward |
+| stream-K for the skinny W4A4 kernel | same speed as split-K at the same grid; the forward did not gain at any grid size (TP4 25.3 -> 25.3-25.9 ms) |
 | Hadamard + quantizer as one kernel, one block per token | 4× slower per call. Redesigned as two launches (shipped): +0.8-1.9% |
 | a 1024-thread activation quantizer | no change |
 | W4A4 lm_head (target) | KLD 0.0846 -> 0.107; Q8_0 kept |
@@ -265,7 +290,8 @@ took ~39.5 ms for 4.26 tokens:
 - **Drafter, ~6.2 ms**, on GPU 0 while the other three wait. Per draft: lm_head 0.97 ms, layers 1.67, top-k over 248k
   0.40, Hadamard and quantize 0.45, ~150 small glue kernels 0.8.
 - **Verify, ~31 ms**: launching and waiting for the 8-token forward (27.4 ms of it on the GPUs). Per GPU that is about:
-  - 9.6 ms of W4A4 matmuls (5.6 at full bandwidth: wave quantization, ~120 resident workgroups);
+  - 9.6 ms of W4A4 matmuls (5.6 at full bandwidth: each wave keeps one step of weights in flight, and grids whose
+    shares are a power-of-two number of activation groups line the streams up on the same DRAM channels);
   - 5.7 ms in 128 all-reduces (~45 us each over PCIe 3.0 peer writes);
   - ~6 ms of small replicated ops;
   - 2.9 ms of Q8_0 `ssm_out`.
@@ -274,7 +300,6 @@ took ~39.5 ms for 4.26 tokens:
 
 What would move it, by size:
 - A drafter fine-tuned on the W4A4 target: acceptance 4.26 against 4.66 with the Q6_K reference, up to +9%.
-- Stream-K for the skinny W4A4 kernel: up to ~6%.
 - A reduced-vocabulary drafter head with top-k on the small logits: ~3% if acceptance holds.
 - A cheaper TP graph rebuild and drafter graph reuse: 1-2%. Capturing the four lanes' token graphs in parallel: ~1%.
 - Faster GPU links: the all-reduces are ~20% of the verify.

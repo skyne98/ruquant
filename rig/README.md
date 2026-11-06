@@ -61,6 +61,13 @@ python3 rig/draft_breakdown.py results.csv            # a one-GPU DFlash2 trace 
 rig/therock/setup.sh                # on the box: AMD TheRock ROCm 7.12 (gfx90X nightly, RCCL with gfx906) in ~/therock-7.12 + build-r712
 rig/therock/build_local.sh MX HOST  # the same build on a workstation in an Ubuntu 22.04 container (85 s on 32 threads), shipped to the box
 rig/rocm72/setup.sh                 # AMD's packaged ROCm 7.2.4 in user space + build-r72 (no RCCL: its rccl has no gfx906 code)
+rig/rocm101/build_local.sh MX HOST  # ROCm 10.1 (mixa3607 gfx906 apt) in an Ubuntu 24.04 container, private glibc 2.39 on the box; 1-2% slower than 7.12
+rig/prof.sh LABEL [VAR=v ...] -- CMD # on the box: one rocprofv3 profile into ~/profiles/<time>-LABEL with meta.txt (never overwritten)
+rig/prof_pull.sh HOST               # finished box profiles into profiles/box1 (one .tar.gz each); profiles/INDEX.md says what each is
+rig/prof_summary.py PROFILE [RE]    # kernel-trace and counter medians per kernel and grid, from a profile dir or .tar.gz
+rig/membench/build.sh HOST          # stream_bench: MI50 read bandwidth vs waves, loads in flight, stride, rotation, launch size
+rig/depth_bench.sh MODEL            # pp512 / tg128 / pp8 at context depths (default 0-64k), one GPU, TP2, TP4, with buffer sizes
+rig/long_ctx_bench.py M D N DEPTH   # DFlash2 through llama-server after a DEPTH-token document, against the questions alone
 ggml_bench --types w4a4,q4_0 --lm q6_K,q8_0 --widths 1,6,8 | python3 rig/bench_summary.py
 ```
 
