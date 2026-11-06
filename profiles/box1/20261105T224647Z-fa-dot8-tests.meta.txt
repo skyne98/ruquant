@@ -1,0 +1,5 @@
+label: fa-dot8-tests
+time: 2026-11-05T22:46:47Z
+binary: /home/gpu/mx-llama.cpp/build-fa/bin (libggml-hip.so md5 ffbb668675c774ba92fcd3eacba17b16)
+command: test-backend-ops -o FLASH_ATTN_EXT -b ROCm0 -p 'hsk=256,hsv=256,nh=4,nr23=\[6,1\]' at RQ_FA_DOT8 0 / 1 / 2, GPU 1
+exit: 0

@@ -1,0 +1,12 @@
+label: rot7-4096-5120
+time: 2026-11-05T19:56:38Z
+host: 5638624099aa
+command: /home/gpu/mx-llama.cpp/build-rot/bin/test-backend-ops perf -o MUL_MAT -b ROCm0 -p type_a=w4a4,type_b=f32,m=4096,n=8,k=5120,
+settings: HIP_VISIBLE_DEVICES=1 GGML_CUDA_DISABLE_FUSION=1 RQ_SKINNY_ROT=7
+rocprofv3: /home/gpu/therock-7.12/bin/rocprofv3 --kernel-trace --kernel-include-regex rq_skinny
+binary: /home/gpu/mx-llama.cpp/build-rot/bin/test-backend-ops
+libggml-hip.so md5: dcee0d2bebc5d9fe530774e7f3660b43
+gpus: 4 (/sys/class/kfd/kfd/topology/nodes/0/properties:gfx /sys/class/kfd/kfd/topology/nodes/1/properties:gfx /sys/class/kfd/kfd/topology/nodes/2/properties:gfx /sys/class/kfd/kfd/topology/nodes/3/properties:gfx /sys/class/kfd/kfd/topology/nodes/4/properties:gfx )
+environment:
+  LD_LIBRARY_PATH=/home/gpu/mx-llama.cpp/build-rot/bin:/home/gpu/therock-7.12/lib
+exit: 0

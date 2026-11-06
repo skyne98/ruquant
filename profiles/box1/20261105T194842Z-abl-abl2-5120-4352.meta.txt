@@ -1,0 +1,12 @@
+label: abl-abl2-5120-4352
+time: 2026-11-05T19:48:42Z
+host: 5638624099aa
+command: /home/gpu/mx-llama.cpp/build-abl2/bin/test-backend-ops perf -o MUL_MAT -b ROCm0 -p type_a=w4a4h,type_b=f32,m=5120,n=8,k=4352,
+settings: HIP_VISIBLE_DEVICES=1 GGML_CUDA_DISABLE_FUSION=1 RQ_SKINNY_SK=0
+rocprofv3: /home/gpu/therock-7.12/bin/rocprofv3 --kernel-trace --kernel-include-regex rq_skinny
+binary: /home/gpu/mx-llama.cpp/build-abl2/bin/test-backend-ops
+libggml-hip.so md5: eb898e4c7a998d08f8116483f3f7a8c9
+gpus: 4 (/sys/class/kfd/kfd/topology/nodes/0/properties:gfx /sys/class/kfd/kfd/topology/nodes/1/properties:gfx /sys/class/kfd/kfd/topology/nodes/2/properties:gfx /sys/class/kfd/kfd/topology/nodes/3/properties:gfx /sys/class/kfd/kfd/topology/nodes/4/properties:gfx )
+environment:
+  LD_LIBRARY_PATH=/home/gpu/mx-llama.cpp/build-abl2/bin:/home/gpu/therock-7.12/lib
+exit: 0

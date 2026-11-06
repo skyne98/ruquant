@@ -1,0 +1,10 @@
+label: skinny-rocprof57-1gpu (recorded before rig/prof.sh; metadata written by hand)
+time: 2026-11-05 ~17:00 UTC
+host: box 1 (4x MI50 32 GB)
+tool: ROCm 5.7 rocprof --timestamp on --basenames on (kernel trace with grid, VGPR, SGPR, LDS)
+binary: ~/mx-llama.cpp/build (ROCm 5.7 build of skyne98/mx-llama.cpp@ruquant bfc4c5d)
+command: HIP_VISIBLE_DEVICES=0 llama-bench -m qwen3.8-27b-ost44-v2-wg64-rb4-gptq.gguf -ngl 99 -fa 1 -lm dio -p 8 -n 0 -r 5
+environment: HSA_FORCE_FINE_GRAIN_PCIE=1 GGML_CUDA_DISABLE_GRAPHS=1 GGML_META_TOKEN_GRAPH=0
+what: every kernel of one-GPU T=8 forwards (warm-up included): skinny W4A4 times per launch shape
+note: the TP4 trace of the same run (t0123) was lost: rocprof v1 needed over 40 min to write it and was stopped by the timeout
+exit: 0

@@ -1,0 +1,9 @@
+label: skinny-counters (by hand)
+tool: rocprofv3 --pmc, six counter groups per configuration (dirs LABEL-M-K-GROUP)
+binary: ~/mx-llama.cpp/build-sk2
+groups: 0 FETCH_SIZE GRBM_GUI_ACTIVE; 1 MemUnitBusy MemUnitStalled; 2 TA_BUSY_avr TA_BUSY_max; 3 VALUBusy SALUBusy; 4 SQ_INSTS_VALU SQ_INSTS_VMEM_RD SQ_INSTS_SMEM SQ_INSTS_SALU SQ_WAVES; 5 L2CacheHit GPUBusy
+configurations: def = split-K default; sk100 / sk120 = RQ_SKINNY_SK=1 RQ_SKINNY_SK_SLOTS=100 / 120; shapes w4a4 4096x5120, 8704x5120, 34816x5120, w4a4h 5120x6144
+environment: HIP_VISIBLE_DEVICES=1 GGML_CUDA_DISABLE_FUSION=1
+what: nothing saturated (VALUBusy 13-34%, MemUnitStalled < 0.4%); the aligned 120-workgroup grid keeps TA busy 4x longer for the same bytes
+also: test/ (first counter test), rqtest.log / rq5.log (custom gfx906 counters via ROCPROFILER_METRICS_PATH=~/tp/rpdefs)
+exit: 0

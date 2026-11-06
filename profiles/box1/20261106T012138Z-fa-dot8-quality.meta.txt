@@ -1,0 +1,6 @@
+label: fa-dot8-quality
+time: 2026-11-06T01:21:38Z
+binary: /home/gpu/mx-llama.cpp/build-fa3/bin (libggml-hip.so md5 be86b2a9fe94018a49853444cd7cf259)
+part 1: rig/score_box.sh with -ub 8 (one GPU): f16 cache, q4_0 stock (RQ_FA_DOT8=0), q4_0 RQ_FA_DOT8=1, =2
+part 2: rig/long_ctx_bench.py at depth 65536, q4_0 cache, RQ_FA_DOT8=1 and =2, one GPU and TP4 (f16 reference: profile depth-64k)
+exit: 0

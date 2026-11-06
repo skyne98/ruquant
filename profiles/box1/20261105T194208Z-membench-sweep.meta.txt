@@ -1,0 +1,6 @@
+label: membench-sweep
+time: 2026-11-05T19:42:08Z
+binary: /home/gpu/rig/membench/stream_bench (rig/membench/stream_bench.hip, md5 f633a6f1f343cea951f03eda748228ac)
+gpu: HIP_VISIBLE_DEVICES=1 (MI50 32 GB, box 1), ROCm: TheRock 7.12
+columns: WGS THREADS D NT A -> GB/s
+exit: 0

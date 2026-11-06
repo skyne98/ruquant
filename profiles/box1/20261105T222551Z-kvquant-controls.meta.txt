@@ -1,0 +1,6 @@
+label: kvquant-controls
+time: 2026-11-05T22:25:51Z
+binary: /home/gpu/mx-llama.cpp/build-r712/bin (libggml-hip.so md5 cb0da0a3fe961c59a596fc13cb14e064)
+part A: against our model's TP4 f16-cache run (~/tp/kv32k-f16.kld): numerics-only changes and q8_0 without rotation
+part B: against UD-Q6_K at 32k (~/tp/kv32k-q6k.kld, TP4): our model with f16 / q8_0 / q4_0 caches
+exit: 0

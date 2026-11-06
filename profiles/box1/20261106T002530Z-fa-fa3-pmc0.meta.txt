@@ -1,0 +1,13 @@
+label: fa-fa3-pmc0
+time: 2026-11-06T00:25:30Z
+host: 5638624099aa
+command: /home/gpu/mx-llama.cpp/build-fa3/bin/llama-bench -m /home/gpu/models/qwen3.8-27b-ost44-v2-wg64-rb4-gptq.gguf -ngl 99 -fa 1 -lm dio -ctk q4_0 -ctv q4_0 -d 65536 -p 8 -n 0 -r 5
+settings: HIP_VISIBLE_DEVICES=0 RQ_FA_DOT8=1 HSA_FORCE_FINE_GRAIN_PCIE=1 GGML_CUDA_DISABLE_GRAPHS=1
+rocprofv3: /home/gpu/therock-7.12/bin/rocprofv3 --pmc GRBM_GUI_ACTIVE SQ_WAVES SQ_INSTS_VALU SQ_INSTS_LDS --kernel-include-regex rq_fa_q4
+binary: /home/gpu/mx-llama.cpp/build-fa3/bin/llama-bench
+libggml-hip.so md5: be86b2a9fe94018a49853444cd7cf259
+gpus: 4 (/sys/class/kfd/kfd/topology/nodes/0/properties:gfx /sys/class/kfd/kfd/topology/nodes/1/properties:gfx /sys/class/kfd/kfd/topology/nodes/2/properties:gfx /sys/class/kfd/kfd/topology/nodes/3/properties:gfx /sys/class/kfd/kfd/topology/nodes/4/properties:gfx )
+environment:
+  LD_LIBRARY_PATH=/home/gpu/mx-llama.cpp/build-fa3/bin:/home/gpu/therock-7.12/lib
+  ROCPROFILER_METRICS_PATH=/home/gpu/tp/rpdefs
+exit: 0

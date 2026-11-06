@@ -1,0 +1,7 @@
+label: membench-stride-rot
+time: 2026-11-05T19:43:20Z
+binary: /home/gpu/rig/membench/stream_bench (md5 c7a3595c5552896d7ec17256c4c5436b)
+gpu: HIP_VISIBLE_DEVICES=1 (MI50 32 GB, box 1), ROCm: TheRock 7.12
+part 1: GB/s against each wave's run length (KB), 480 waves, D 2, no math
+part 2: skinny-like grids (8 waves per workgroup, D 2, 32 dot8 per load) with and without per-wave rotation
+exit: 0

@@ -1,0 +1,5 @@
+label: fwd-rot
+time: 2026-11-05T20:00:32Z
+binary: /home/gpu/mx-llama.cpp/build-rot/bin (libggml-hip.so md5 dcee0d2bebc5d9fe530774e7f3660b43)
+command: llama-bench -p 8 -n 0 -r 30 (median of repetitions 11-30), -sm tensor for TP; HIP graphs + token graphs
+exit: 0

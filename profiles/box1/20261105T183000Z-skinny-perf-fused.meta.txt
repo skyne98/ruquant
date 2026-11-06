@@ -1,0 +1,8 @@
+label: skinny-perf-fused (by hand)
+time: 2026-11-05 ~18:30 UTC
+tool: rocprofv3 --kernel-trace (TheRock 7.12)
+binary: ~/mx-llama.cpp/build-sk2 (refactored skinny kernel + stream-K, md5 of the fork diff in REPORT)
+command: test-backend-ops perf -o MUL_MAT -b ROCm0 -p 'type_a=w4a4.*n=8', GPU 1, RQ_SKINNY_SK=0 then 1
+what: the W4A4 perf cases; perf mode repeats each matmul and the fork fuses three per launch, so grids are 3x the single matmul
+note: a per-shape version of this run (fusion on) was overwritten by the fusion-off rerun in skinny-per-shape
+exit: 0

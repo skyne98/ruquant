@@ -1,0 +1,6 @@
+label: fa-dot8-v2
+time: 2026-11-05T23:39:24Z
+binary: /home/gpu/mx-llama.cpp/build-fa2/bin (libggml-hip.so md5 26859f72b15cd1e67341668dab6adae2)
+part 1: test-backend-ops FLASH_ATTN_EXT (head 256, gqa 6, q4_0) at RQ_FA_DOT8 1 / 2 (GPU 1)
+part 2: llama-bench tg128 and pp8 at depth 0, 16384, 65536, one GPU, q4_0 cache, RQ_FA_DOT8 1 / 2
+exit: 0

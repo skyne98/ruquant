@@ -1,0 +1,7 @@
+label: skinny-grid-sweep (by hand)
+tool: rocprofv3 --kernel-trace
+binary: ~/mx-llama.cpp/build-sk2
+command: as skinny-per-shape; dirs LABEL-M-K with LABEL SK0-G<n> (RQ_SKINNY_SK=0 RQ_SKINNY_G=n) or SK1-slots<n> (RQ_SKINNY_SK=1 RQ_SKINNY_SK_SLOTS=n)
+environment: HIP_VISIBLE_DEVICES=1 GGML_CUDA_DISABLE_FUSION=1
+what: time vs grid size; shares of exactly 32 activation groups per workgroup run 2x slower (5120x6144 at 120, 4096x5120 at 80)
+exit: 0

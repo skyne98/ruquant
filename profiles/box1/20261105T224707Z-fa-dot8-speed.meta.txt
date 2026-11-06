@@ -1,0 +1,6 @@
+label: fa-dot8-speed
+time: 2026-11-05T22:47:07Z
+binary: /home/gpu/mx-llama.cpp/build-fa/bin (libggml-hip.so md5 ffbb668675c774ba92fcd3eacba17b16)
+command: rig/depth_bench.sh, depths 0,16384,65536, GPUs 0 and 0,1,2,3: f16 cache, q4_0 cache at RQ_FA_DOT8 0 / 1 / 2
+note: stopped during the TP4 q4_0 runs; the kernel was revised (fa-dot8-v2)
+exit: 143

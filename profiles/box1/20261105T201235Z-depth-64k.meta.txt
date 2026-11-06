@@ -1,0 +1,8 @@
+label: depth-64k
+time: 2026-11-05T20:12:35Z
+binary: /home/gpu/mx-llama.cpp/build-r712/bin (libggml-hip.so md5 cb0da0a3fe961c59a596fc13cb14e064, the published default)
+model: /home/gpu/models/qwen3.8-27b-ost44-v2-wg64-rb4-gptq.gguf
+drafter: /home/gpu/models/dflash2-ost44-h4-l4-c8-g64-rb4.gguf
+part 1: rig/depth_bench.sh, depths 0,16384,32768,65536, GPUs 0 / 0,1 / 0,1,2,3
+part 2: rig/long_ctx_bench.py at depth 65536 (wikitext document + 3 questions, and the questions alone), draft 7
+exit: 0

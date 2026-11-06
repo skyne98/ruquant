@@ -1,0 +1,6 @@
+label: membench-size
+time: 2026-11-05T19:44:16Z
+binary: /home/gpu/rig/membench/stream_bench (md5 c7a3595c5552896d7ec17256c4c5436b)
+gpu: HIP_VISIBLE_DEVICES=1, TheRock 7.12
+what: GB/s against launch size (KB per wave x waves), skinny-like grids, rotation 3
+exit: 0
