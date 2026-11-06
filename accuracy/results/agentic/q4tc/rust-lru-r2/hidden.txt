@@ -1,0 +1,22 @@
+$ cargo test --offline --test hidden_lru
+   Compiling lru v0.1.0 (/tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/q4tc/rust-lru-r2/check)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running tests/hidden_lru.rs (target/debug/deps/hidden_lru-78e4f564e9dfb261)
+
+running 11 tests
+test capacity_one ... ok
+test get_mut_touches ... ok
+test peek_does_not_touch ... ok
+test order_and_iter ... ok
+test put_existing_returns_old_and_touches ... ok
+test remove_pop_clear ... ok
+test resize_evicts_lru ... ok
+test string_keys ... ok
+test values_are_dropped ... ok
+test zero_capacity_panics - should panic ... ok
+test constant_time_operations ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+[exit 0]

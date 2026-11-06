@@ -1,0 +1,65 @@
+ more_itertools/more.py |  2 +-
+ tests/test_more.py     | 37 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/more_itertools/more.py b/more_itertools/more.py
+index e31a62f..fd7d5cb 100755
+--- a/more_itertools/more.py
++++ b/more_itertools/more.py
+@@ -1060,7 +1060,7 @@ def windowed(seq, n, fillvalue=None, step=1):
+ 
+     # Create the filler for the next windows. The padding ensures
+     # we have just enough elements to fill the last window.
+-    padding = (fillvalue,) * (n - 1 if step >= n else step - 2)
++    padding = (fillvalue,) * (n - 1)
+     filler = map(window.append, chain(iterator, padding))
+ 
+     # Generate the rest of the windows
+diff --git a/tests/test_more.py b/tests/test_more.py
+index e6f7c6d..e2ef860 100644
+--- a/tests/test_more.py
++++ b/tests/test_more.py
+@@ -858,6 +858,43 @@ class WindowedTests(TestCase):
+         expected = [(1, 2, 3), (4, 5, '!')]
+         self.assertEqual(actual, expected)
+ 
++    def test_last_window_padded_with_step(self):
++        # Regression test: the final, partial window must be padded with the
++        # fillvalue even when step > 1 (it used to be dropped entirely).
++        actual = list(mi.windowed(range(6), 3, step=2))
++        expected = [(0, 1, 2), (2, 3, 4), (4, 5, None)]
++        self.assertEqual(actual, expected)
++
++    def test_last_window_padded_with_step_fillvalue(self):
++        actual = list(mi.windowed(range(10), 4, fillvalue='!', step=3))
++        expected = [
++            (0, 1, 2, 3),
++            (3, 4, 5, 6),
++            (6, 7, 8, 9),
++            (9, '!', '!', '!'),
++        ]
++        self.assertEqual(actual, expected)
++
++    def test_last_window_padded_with_step_variants(self):
++        # Exhaustive check that the last window is padded (never dropped) and
++        # no all-fillvalue window is emitted, for a grid of n and step.
++        data = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
++        L = len(data)
++        for n in range(1, 11):
++            for step in range(1, 11):
++                with self.subTest(n=n, step=step):
++                    actual = list(mi.windowed(data, n, fillvalue='!', step=step))
++                    # The correct number of windows: one per start position
++                    # 0, step, 2*step, ... while the start index < L.
++                    expected_count = (L - 1) // step + 1
++                    self.assertEqual(len(actual), expected_count)
++                    for window in actual:
++                        # Every window is padded to width n.
++                        self.assertEqual(len(window), n)
++                        # No window is entirely fillvalue; the last one always
++                        # still contains a real item.
++                        self.assertNotEqual(window, ('!',) * n)
++
+     def test_invalid_n(self):
+         with self.assertRaises(ValueError):
+             list(mi.windowed([1, 2, 3, 4, 5], 0))  # n is zero

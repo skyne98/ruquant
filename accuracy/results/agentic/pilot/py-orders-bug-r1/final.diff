@@ -1,0 +1,112 @@
+ shop/pricing.py             |  6 +---
+ tests/test_bulk_discount.py | 80 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 81 insertions(+), 5 deletions(-)
+
+diff --git a/shop/pricing.py b/shop/pricing.py
+index a57a1ec..0bc003e 100644
+--- a/shop/pricing.py
++++ b/shop/pricing.py
+@@ -1,5 +1,4 @@
+ from .models import LineItem, Order
+-from .money import percent_of
+ 
+ BULK_MIN_QTY = 10
+ BULK_PERCENT = 10
+@@ -7,10 +6,7 @@ BULK_PERCENT = 10
+ 
+ def line_total(item: LineItem) -> int:
+     """Price of one line before order-level discounts."""
+-    total = item.product.price_cents * item.qty
+-    if item.qty >= BULK_MIN_QTY:
+-        total -= percent_of(total, BULK_PERCENT)
+-    return total
++    return item.product.price_cents * item.qty
+ 
+ 
+ def subtotal(order: Order) -> int:
+diff --git a/tests/test_bulk_discount.py b/tests/test_bulk_discount.py
+new file mode 100644
+index 0000000..02eb5ff
+--- /dev/null
++++ b/tests/test_bulk_discount.py
+@@ -0,0 +1,80 @@
++"""Regression: the bulk discount must be applied exactly once.
++
++Customer report: 12 notebooks @ $2.50, receipt showed a $3.00 bulk line but
++the total was short because the discount was baked into the line total *and*
++subtracted again at the order level. The line/subtotal/total no longer matched.
++"""
++from shop.checkout import discounts, receipt, total
++from shop.models import Order, Product
++from shop.pricing import BULK_MIN_QTY, BULK_PERCENT, line_total, subtotal
++
++NOTEBOOK = Product("NB-A5", "Notebook", 250)
++
++
++def _cents(token: str) -> int:
++    """Parse a receipt amount token like '$30.00' or '-$3.00' into signed cents."""
++    neg = token.startswith("-")
++    t = token.lstrip("-").lstrip("$")
++    whole, frac = t.split(".")
++    value = int(whole) * 100 + int(frac)
++    return -value if neg else value
++
++
++def _parse_receipt(text: str):
++    """Return (items, subtotal, total, discount_lines) from a rendered receipt."""
++    items, discounts_out = [], []
++    subtotal = total = None
++    for ln in text.splitlines()[1:]:
++        if not ln.strip():
++            continue
++        parts = ln.split()
++        amount = _cents(parts[-1])
++        label = " ".join(parts[:-1])
++        if label.startswith("Subtotal"):
++            subtotal = amount
++        elif label.startswith("Total"):
++            total = amount
++        elif " x " in label:
++            items.append((label, amount))
++        else:
++            discounts_out.append((label, amount))
++    return items, subtotal, total, discounts_out
++
++
++def test_bulk_discount_applied_once():
++    o = Order("cust")
++    o.add(NOTEBOOK, 12)  # 12 >= BULK_MIN_QTY
++
++    gross = NOTEBOOK.price_cents * 12
++    bulk_off = (gross * BULK_PERCENT + 50) // 100  # 10%, half-up, like money.percent_of
++
++    # Line total and subtotal are the gross; the discount is not pre-baked in.
++    assert line_total(o.items[0]) == gross
++    assert subtotal(o) == gross
++
++    # Exactly one bulk discount, for the right amount.
++    assert discounts(o) == [("Bulk discount (Notebook)", bulk_off)]
++
++    # Charged correctly: subtotal minus the single discount.
++    assert total(o) == gross - bulk_off
++
++
++def test_receipt_adds_up_and_keeps_discount_line():
++    o = Order("cust")
++    o.add(NOTEBOOK, 12)
++
++    gross = NOTEBOOK.price_cents * 12
++    bulk_off = (gross * BULK_PERCENT + 50) // 100
++
++    text = receipt(o)
++    items, subtotal_amt, total_amt, discount_lines = _parse_receipt(text)
++
++    # The bulk discount line is still on the receipt.
++    labels = [label for label, _ in discount_lines]
++    assert "Bulk discount (Notebook)" in labels
++
++    # Items sum to the subtotal, and subtotal minus discounts equals the total.
++    assert sum(amount for _, amount in items) == subtotal_amt
++    assert subtotal_amt == gross
++    assert total_amt == gross - bulk_off
++    assert subtotal_amt + sum(amount for _, amount in discount_lines) == total_amt

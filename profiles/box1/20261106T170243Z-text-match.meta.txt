@@ -1,0 +1,2 @@
+label: text-match; binary: /home/gpu/mx-llama.cpp/build-tm/bin (libllama-server-impl.so md5 314bb57bd1e30e9a1d5bd22429eec3e9); gpus 0,1,2,3
+exit: 0

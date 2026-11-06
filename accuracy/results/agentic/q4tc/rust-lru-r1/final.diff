@@ -1,0 +1,508 @@
+ src/lib.rs | 434 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 419 insertions(+), 15 deletions(-)
+
+diff --git a/src/lib.rs b/src/lib.rs
+index 6efe474..b04789f 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,81 +1,485 @@
+ //! A least-recently-used cache with a fixed capacity.
+ 
++use std::collections::HashMap;
+ use std::hash::Hash;
+ 
+ /// A map that holds at most `capacity` entries. When a new key is inserted into a full cache, the least recently
+ /// used entry is evicted. `get` and `put` count as uses; `peek` does not.
+ ///
+ /// All operations except `iter` and `resize` are O(1) on average.
++///
++/// Entries live in a `Vec` of nodes whose `prev`/`next` fields form a doubly linked list ordered from most
++/// recently used (head) to least recently used (tail). The map sends each key straight to its node, so lookups,
++/// inserts, and removals are O(1); removing a node swaps it with the vec's last element and repairs the
++/// affected links, so memory stays O(capacity).
+ pub struct LruCache<K, V> {
+-    _marker: std::marker::PhantomData<(K, V)>,
++    map: HashMap<K, usize>,
++    nodes: Vec<Node<K, V>>,
++    head: Option<usize>,
++    tail: Option<usize>,
++    capacity: usize,
++}
++
++struct Node<K, V> {
++    key: K,
++    value: V,
++    prev: Option<usize>,
++    next: Option<usize>,
+ }
+ 
+ impl<K: Hash + Eq + Clone, V> LruCache<K, V> {
+     /// Panics if `capacity` is 0.
+     pub fn new(capacity: usize) -> Self {
+-        todo!()
++        assert!(capacity > 0, "capacity must be non-zero");
++        Self {
++            map: HashMap::new(),
++            nodes: Vec::new(),
++            head: None,
++            tail: None,
++            capacity,
++        }
+     }
+ 
+     /// Returns the value and marks the entry as most recently used.
+     pub fn get(&mut self, key: &K) -> Option<&V> {
+-        todo!()
++        let i = *self.map.get(key)?;
++        self.move_to_head(i);
++        Some(&self.nodes[i].value)
+     }
+ 
+     /// Like `get`, but returns a mutable reference.
+     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+-        todo!()
++        let i = *self.map.get(key)?;
++        self.move_to_head(i);
++        Some(&mut self.nodes[i].value)
+     }
+ 
+     /// Returns the value without changing the order.
+     pub fn peek(&self, key: &K) -> Option<&V> {
+-        todo!()
++        let i = *self.map.get(key)?;
++        Some(&self.nodes[i].value)
+     }
+ 
+     /// Inserts or replaces a value and marks it as most recently used. Returns the old value if the key was
+     /// present. If the key is new and the cache is full, the least recently used entry is evicted first.
+     pub fn put(&mut self, key: K, value: V) -> Option<V> {
+-        todo!()
++        if let Some(&i) = self.map.get(&key) {
++            self.unlink(i);
++            let old = std::mem::replace(&mut self.nodes[i].value, value);
++            self.attach_head(i);
++            return Some(old);
++        }
++        if self.nodes.len() == self.capacity {
++            let t = self.tail.expect("a full cache with non-zero capacity is non-empty");
++            self.remove_node(t);
++        }
++        self.insert_head(key, value);
++        None
+     }
+ 
+     /// Removes an entry and returns its value.
+     pub fn remove(&mut self, key: &K) -> Option<V> {
+-        todo!()
++        let i = self.map.remove(key)?;
++        let (_, value) = self.remove_node(i);
++        Some(value)
+     }
+ 
+     /// Removes and returns the least recently used entry.
+     pub fn pop_lru(&mut self) -> Option<(K, V)> {
+-        todo!()
++        let t = self.tail?;
++        Some(self.remove_node(t))
+     }
+ 
+     pub fn contains(&self, key: &K) -> bool {
+-        todo!()
++        self.map.contains_key(key)
+     }
+ 
+     pub fn len(&self) -> usize {
+-        todo!()
++        self.nodes.len()
+     }
+ 
+     pub fn is_empty(&self) -> bool {
+-        todo!()
++        self.nodes.is_empty()
+     }
+ 
+     pub fn capacity(&self) -> usize {
+-        todo!()
++        self.capacity
+     }
+ 
+     /// Changes the capacity, evicting least recently used entries until `len() <= capacity`. Panics if
+     /// `capacity` is 0.
+     pub fn resize(&mut self, capacity: usize) {
+-        todo!()
++        assert!(capacity > 0, "capacity must be non-zero");
++        self.capacity = capacity;
++        while self.nodes.len() > capacity {
++            let t = self.tail.expect("len > capacity >= 1 implies the cache is non-empty");
++            self.remove_node(t);
++        }
+     }
+ 
+     /// Removes every entry.
+     pub fn clear(&mut self) {
+-        todo!()
++        self.nodes.clear();
++        self.map.clear();
++        self.head = None;
++        self.tail = None;
+     }
+ 
+     /// Iterates from the most recently used entry to the least recently used one.
+     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> + '_ {
+-        std::iter::empty()
++        let mut cur = self.head;
++        std::iter::from_fn(move || {
++            let i = cur?;
++            cur = self.nodes[i].next;
++            Some((&self.nodes[i].key, &self.nodes[i].value))
++        })
++    }
++
++    /// Unlinks node `i` from the list, leaving it in `nodes`.
++    fn unlink(&mut self, i: usize) {
++        let prev = self.nodes[i].prev;
++        let next = self.nodes[i].next;
++        if let Some(p) = prev {
++            self.nodes[p].next = next;
++        } else {
++            self.head = next;
++        }
++        if let Some(n) = next {
++            self.nodes[n].prev = prev;
++        } else {
++            self.tail = prev;
++        }
++        self.nodes[i].prev = None;
++        self.nodes[i].next = None;
++    }
++
++    /// Links the unlinked node `i` in front of the current head.
++    fn attach_head(&mut self, i: usize) {
++        let old_head = self.head;
++        self.nodes[i].prev = None;
++        self.nodes[i].next = old_head;
++        if let Some(h) = old_head {
++            self.nodes[h].prev = Some(i);
++        }
++        self.head = Some(i);
++        if self.tail.is_none() {
++            self.tail = Some(i);
++        }
++    }
++
++    fn move_to_head(&mut self, i: usize) {
++        if self.head == Some(i) {
++            return;
++        }
++        self.unlink(i);
++        self.attach_head(i);
++    }
++
++    /// Pushes a new node at the head of the list (most recently used).
++    fn insert_head(&mut self, key: K, value: V) {
++        let i = self.nodes.len();
++        let old_head = self.head;
++        self.nodes.push(Node { key, value, prev: None, next: old_head });
++        if let Some(h) = old_head {
++            self.nodes[h].prev = Some(i);
++        }
++        self.head = Some(i);
++        if self.tail.is_none() {
++            self.tail = Some(i);
++        }
++        self.map.insert(self.nodes[i].key.clone(), i);
++    }
++
++    /// Unlinks node `i` and removes it from `nodes`, returning its key and value.
++    fn remove_node(&mut self, i: usize) -> (K, V) {
++        self.unlink(i);
++
++        let removed = self.nodes.swap_remove(i);
++        // If a node was swapped into slot `i`, its own `prev`/`next` are still correct, but its
++        // neighbours (and `head`/`tail` if it is at an end) still point at its old index.
++        let last = self.nodes.len();
++        if last != i {
++            let prev = self.nodes[i].prev;
++            let next = self.nodes[i].next;
++            if let Some(p) = prev {
++                self.nodes[p].next = Some(i);
++            } else {
++                self.head = Some(i);
++            }
++            if let Some(n) = next {
++                self.nodes[n].prev = Some(i);
++            } else {
++                self.tail = Some(i);
++            }
++            self.map.insert(self.nodes[i].key.clone(), i);
++        }
++        self.map.remove(&removed.key);
++        (removed.key, removed.value)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::LruCache;
++
++    #[test]
++    fn empty_cache() {
++        let mut c: LruCache<u32, u32> = LruCache::new(4);
++        assert_eq!(c.capacity(), 4);
++        assert_eq!(c.len(), 0);
++        assert!(c.is_empty());
++        assert!(!c.contains(&0));
++        assert_eq!(c.get(&0), None);
++        assert_eq!(c.peek(&0), None);
++        assert_eq!(c.get_mut(&0), None);
++        assert_eq!(c.remove(&0), None);
++        assert_eq!(c.pop_lru(), None);
++        assert_eq!(c.iter().count(), 0);
++    }
++
++    #[test]
++    #[should_panic]
++    fn new_zero_panics() {
++        let _ = LruCache::<u8, u8>::new(0);
++    }
++
++    #[test]
++    fn put_get_peek() {
++        let mut c = LruCache::new(2);
++        assert_eq!(c.put('a', 1), None);
++        assert_eq!(c.put('a', 10), Some(1));
++        assert_eq!(c.len(), 1);
++        assert_eq!(c.get(&'a'), Some(&10));
++        assert_eq!(c.peek(&'a'), Some(&10));
++        assert_eq!(c.peek(&'b'), None);
++        assert!(c.contains(&'a'));
++    }
++
++    #[test]
++    fn get_refreshes_order() {
++        let mut c = LruCache::new(2);
++        c.put('a', 1);
++        c.put('b', 2);
++        c.get(&'a'); // order is now b (lru), a (mru)
++        c.put('c', 3); // evicts 'b', not 'a'
++        assert_eq!(c.get(&'a'), Some(&1));
++        assert_eq!(c.get(&'c'), Some(&3));
++        assert_eq!(c.contains(&'b'), false);
++    }
++
++    #[test]
++    fn get_mut_refreshes_order_and_mutates() {
++        let mut c = LruCache::new(2);
++        c.put('a', 1);
++        c.put('b', 2);
++        *c.get_mut(&'a').unwrap() += 10;
++        assert_eq!(c.get(&'a'), Some(&11));
++        c.put('c', 3); // evicts 'b', not 'a'
++        assert_eq!(c.contains(&'b'), false);
++        assert_eq!(c.get_mut(&'c'), Some(&mut 3));
++        assert_eq!(c.get_mut(&'z'), None);
++    }
++
++    #[test]
++    fn peek_does_not_refresh_order() {
++        let mut c = LruCache::new(2);
++        c.put('a', 1);
++        c.put('b', 2);
++        assert_eq!(c.peek(&'a'), Some(&1));
++        c.put('c', 3); // evicts 'a' because peek did not refresh it
++        assert_eq!(c.contains(&'a'), false);
++        assert_eq!(c.contains(&'b'), true);
++        assert_eq!(c.contains(&'c'), true);
++    }
++
++    #[test]
++    fn put_replaces_existing_without_evicting() {
++        let mut c = LruCache::new(2);
++        c.put('a', 1);
++        c.put('b', 2);
++        assert_eq!(c.put('b', 20), Some(2));
++        assert_eq!(c.len(), 2);
++        assert_eq!(c.get(&'b'), Some(&20));
++        // 'b' is now MRU, so 'a' is LRU
++        c.put('c', 3);
++        assert_eq!(c.contains(&'a'), false);
++        assert_eq!(c.contains(&'b'), true);
++        assert_eq!(c.contains(&'c'), true);
++    }
++
++    #[test]
++    fn eviction_is_least_recently_used() {
++        let mut c: LruCache<char, u32> = LruCache::new(3);
++        c.put('a', 1);
++        c.put('b', 2);
++        c.put('c', 3);
++        c.get(&'a'); // order: a (mru), c, b (lru)
++        c.put('d', 4); // evicts 'b'
++        assert_eq!(c.contains(&'b'), false);
++        assert!(c.contains(&'a') && c.contains(&'c') && c.contains(&'d'));
++        assert_eq!(c.len(), 3);
++    }
++
++    #[test]
++    fn remove_frees_capacity() {
++        let mut c = LruCache::new(2);
++        c.put('a', 1);
++        c.put('b', 2);
++        assert_eq!(c.remove(&'a'), Some(1));
++        assert_eq!(c.remove(&'a'), None);
++        assert_eq!(c.len(), 1);
++        c.put('c', 3); // no eviction needed: capacity was freed
++        assert_eq!(c.get(&'b'), Some(&2));
++        assert_eq!(c.get(&'c'), Some(&3));
++    }
++
++    #[test]
++    fn pop_lru() {
++        let mut c = LruCache::new(3);
++        assert_eq!(c.pop_lru(), None);
++        c.put('a', 1);
++        c.put('b', 2);
++        c.get(&'a');
++        assert_eq!(c.pop_lru(), Some(('b', 2)));
++        assert_eq!(c.pop_lru(), Some(('a', 1)));
++        assert_eq!(c.pop_lru(), None);
++        assert!(c.is_empty());
++        // works after being emptied
++        c.put('x', 9);
++        assert_eq!(c.pop_lru(), Some(('x', 9)));
++    }
++
++    #[test]
++    fn iter_mru_to_lru_and_values() {
++        let mut c = LruCache::new(3);
++        c.put(1, "one");
++        c.put(2, "two");
++        c.put(3, "three");
++        c.get(&2);
++        let v: Vec<_> = c.iter().collect();
++        assert_eq!(v, vec![(&2, &"two"), (&3, &"three"), (&1, &"one")]);
++    }
++
++    #[test]
++    fn iter_does_not_change_order() {
++        let mut c = LruCache::new(3);
++        c.put('a', 1);
++        c.put('b', 2);
++        c.put('c', 3);
++        for _ in c.iter() {}
++        assert_eq!(c.pop_lru(), Some(('a', 1)));
++    }
++
++    #[test]
++    fn capacity_one() {
++        let mut c = LruCache::new(1);
++        c.put(1, "a");
++        c.put(2, "b");
++        assert_eq!(c.get(&1), None);
++        assert_eq!(c.get(&2), Some(&"b"));
++        assert_eq!(c.len(), 1);
++        // replacing the sole entry keeps it
++        assert_eq!(c.put(2, "c"), Some("b"));
++        assert_eq!(c.get(&2), Some(&"c"));
++    }
++
++    #[test]
++    fn resize_down_evicts_lru() {
++        let mut c = LruCache::new(3);
++        c.put(1, 10);
++        c.put(2, 20);
++        c.put(3, 30);
++        c.resize(2);
++        assert_eq!(c.capacity(), 2);
++        assert_eq!(c.len(), 2);
++        assert_eq!(c.get(&1), None);
++        assert_eq!(c.get(&2), Some(&20));
++        assert_eq!(c.get(&3), Some(&30));
++        // growing the capacity evicts nothing
++        c.resize(5);
++        assert_eq!(c.capacity(), 5);
++        assert_eq!(c.len(), 2);
++        c.put(4, 40);
++        c.put(5, 50);
++        assert_eq!(c.len(), 4);
++    }
++
++    #[test]
++    #[should_panic]
++    fn resize_zero_panics() {
++        let mut c = LruCache::<u8, u8>::new(2);
++        c.resize(0);
++    }
++
++    #[test]
++    fn clear() {
++        let mut c = LruCache::new(2);
++        c.put('a', 1);
++        c.put('b', 2);
++        c.clear();
++        assert!(c.is_empty());
++        assert_eq!(c.len(), 0);
++        assert_eq!(c.iter().count(), 0);
++        assert_eq!(c.pop_lru(), None);
++        c.put('c', 3);
++        assert_eq!(c.get(&'c'), Some(&3));
++    }
++
++    #[test]
++    fn order_after_mixed_ops() {
++        let mut c = LruCache::new(4);
++        c.put(1, 1);
++        c.put(2, 2);
++        c.put(3, 3);
++        c.put(4, 4);
++        // mru..lru: 4 3 2 1
++        c.get(&2); // 2 4 3 1
++        c.remove(&4); // 2 3 1
++        c.put(5, 5); // 5 2 3 1
++        c.peek(&3); // unchanged
++        c.get_mut(&1); // 1 5 2 3
++        let v: Vec<_> = c.iter().map(|(k, _)| *k).collect();
++        assert_eq!(v, vec![1, 5, 2, 3]);
++        assert_eq!(c.pop_lru(), Some((3, 3)));
++        let v: Vec<_> = c.iter().map(|(k, _)| *k).collect();
++        assert_eq!(v, vec![1, 5, 2]);
++    }
++
++    #[test]
++    fn long_sequence_stays_consistent() {
++        // Interleave puts, gets, removals, and pops, checking invariants at every step.
++        let mut c = LruCache::new(5);
++        let mut expect: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
++        for i in 0..200u32 {
++            match i % 4 {
++                0 => {
++                    let v = i * 2;
++                    expect.insert(i, v);
++                    assert_eq!(c.put(i, v), None);
++                }
++                1 => {
++                    let k = i % 7;
++                    let got = c.get(&k);
++                    assert_eq!(got.copied(), expect.get(&k).copied());
++                }
++                2 => {
++                    let k = i % 5;
++                    let got = c.remove(&k);
++                    assert_eq!(got, expect.remove(&k));
++                }
++                _ => {
++                    let popped = c.pop_lru();
++                    if let Some((k, v)) = popped {
++                        assert_eq!(expect.get(&k).copied(), Some(v));
++                        expect.remove(&k);
++                    }
++                }
++            }
++            assert!(c.len() <= 5, "capacity violated: len = {}", c.len());
++            assert_eq!(c.len(), expect.len());
++            for (k, v) in c.iter() {
++                assert_eq!(expect.get(k).copied(), Some(*v));
++            }
++        }
+     }
+ }

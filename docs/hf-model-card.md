@@ -11,14 +11,18 @@ tags:
   - gfx906
   - speculative-decoding
   - dflash
+  - vision
+  - nvidia
+  - tensor-cores
 ---
 
 # Qwen3.8-27B W4A4 GGUF (int4 weights × int4 activations)
 
 [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) quantized by [ruquant](https://github.com/skyne98/ruquant)
 to pure W4A4. Both the weights and the activations are int4, and the matmuls run as int4 × int4 dot products
-(`v_dot8_i32_i4` on AMD gfx906 / MI50). A W4A4H version of incoai's DFlash2 drafter comes with it, for speculative
-decoding.
+(`v_dot8_i32_i4` on AMD gfx906 / MI50, `mma.sync .s4` INT4 tensor cores on NVIDIA Turing / Ampere / Ada). A W4A4H
+version of incoai's DFlash2 drafter comes with it, for speculative decoding, and a vision projector matched to the
+model, for images.
 
 **These files need the ruquant fork of mx-llama.cpp:**
 [skyne98/mx-llama.cpp, branch `ruquant`](https://github.com/skyne98/mx-llama.cpp/tree/ruquant). Stock llama.cpp does
@@ -29,7 +33,11 @@ TheRock gfx90X build, the default) and ROCm 5.7.
 |---|---|---|
 | `Qwen3.8-27B-W4A4-OST-GPTQ-wg64-rb4.gguf` | 17.19 GB | the target model |
 | `Qwen3.8-27B-DFlash2-W4A4H-drafter-rb4.gguf` | 2.65 GB | the DFlash2 drafter converted for it |
+| `mmproj-Qwen3.8-27B-W4A4-F16.gguf` | 0.97 GB | the vision projector for this model (`--mmproj`) |
 | `SHA256SUMS` | | checksums |
+
+**Use this model's own projector for images.** The model's residual stream is rotated (OSTQuant), so the original
+Qwen3.8-27B projector, as unsloth's or anyone else's mmproj file ships it, gives the model noise instead of images.
 
 ## Results (4× AMD MI50 32 GB, PCIe 3.0, ROCm 7.12)
 
@@ -55,6 +63,46 @@ Quality, KL divergence against UD-Q8_K_XL's logits (wikitext-2, 64 chunks of 204
 | unsloth UD-Q4_K_XL | 0.0078 | 96.58% | 0.999 |
 | unsloth Q4_0 | 0.0259 | 93.34% | 1.022 |
 | **this model (W4A4)** | **0.0428** | **91.57%** | 1.028 |
+
+## Images
+
+Add `--mmproj mmproj-Qwen3.8-27B-W4A4-F16.gguf` to the server. It is Qwen3.8-27B's own vision tower, with the
+projector's output rotated into this model's residual basis (R1 folded into its last layer). On four test images (a
+bar chart, a road sign, coloured shapes, a chat screenshot) it reads the chart values, the sign word for word and the
+screenshot's names and link: 4 / 4 on an RTX 3090, 3 / 3 on 4× MI50 with the fork. The original projector gets 0 / 4
+(it calls the sign "The Great Outdoors" and the screenshot "completely blank"). It works together with the DFlash2
+drafter and the 4-bit KV cache.
+
+## 4-bit KV cache
+
+`-ctk q4_0 -ctv q4_0` stores the cache in 4 bits (64k context: 1.2 GB instead of 4.35 GB). For decode and the
+speculative verify, the fork reads it with its own int4 × int4 attention (Q quantized to int4, `v_dot8` on gfx906,
+INT4 tensor cores on NVIDIA); prefill uses llama.cpp's kernels.
+- Quality at 32k context against UD-Q8_K_XL run at 32k (positions 16k-32k, every position through the decode / verify
+  kernel): KLD 0.0339 against 0.0319 for an f16 cache, top-1 91.5% against 91.8%.
+- Speed at 64k on one MI50: the DFlash2 step goes from 80 to 71.5 ms (decode 44.7 to 38.5 ms). At TP4 it is the same
+  as f16. It does not remove the cost of deep context (51 ms per step with a short prompt); the kernel is
+  latency-bound and has room left.
+- On an RTX 3090 one attention layer at 64k takes 211 us at decode and 341 us at an 8-token verify, against 328 / 366 us
+  with an f16 cache.
+
+## As a coding agent
+
+Driven by opencode (a coding agent) through eight programming tasks with hidden tests: a support-ticket bug across a
+small package, a CLI feature, a 7-module refactor, a planted bug in more-itertools' 5.5k-line module, an LRU cache and
+an expression parser in Rust, a CSV parser fix in JavaScript, and a four-turn session building a Markdown converter
+(up to 61k tokens of context). With the 4-bit cache, DFlash2 and sampling at temperature 1, on an RTX 3090: **all 16
+runs (every task twice) passed every hidden test**, and none of the 428 tool calls was malformed. Harness, tasks and
+transcripts: [ruquant `accuracy/agentic`](https://github.com/skyne98/ruquant/tree/main/accuracy/agentic).
+
+For agent use:
+- Leave out `-bs --samplers temperature`. It is greedy only when a client sends temperature 0. Agent clients send a
+  temperature, and then it samples the whole distribution, without top-k or top-p.
+- Use the fork from 2026-11-06 or later. The model sometimes samples a valid but non-canonical tokenization of its
+  answer. When the client sends the same text back, the server tokenizes it differently, and because the model's
+  recurrent state can't be rewound, older builds re-processed the whole answer (up to 16k tokens, 20-30 s). The
+  server now matches such text against its cache and checkpoints every 4096 generated tokens (`LLAMA_TEXT_MATCH=0`
+  and `LLAMA_GEN_CKPT_STEP=0` turn these off).
 
 ## Reproduce the results
 
@@ -105,7 +153,9 @@ HIP_VISIBLE_DEVICES=0,1,2,3 ~/mx-llama.cpp/build-r712/bin/llama-server \
   - `-devd ROCm0` pins the drafter to one GPU. Replicating it on every GPU (mx's default) is 19% slower; splitting it
     is 24% slower.
   - `--spec-draft-n-max 7` is the most DFlash2's block of 8 allows, and the best: 5 and 6 are 6% and 4% slower.
-  - `-bs --samplers temperature` with temperature 0 is greedy decoding.
+  - `-bs --samplers temperature` with temperature 0 is greedy decoding. For agents and chat clients that send a
+    temperature, leave it out (see "As a coding agent").
+  - `--mmproj mmproj-Qwen3.8-27B-W4A4-F16.gguf` adds images; `-ctk q4_0 -ctv q4_0` the 4-bit cache.
   - `-lm dio` only loads the file with direct I/O.
 
 The requests: `POST /v1/chat/completions` with `"temperature": 0, "max_tokens": 256, "cache_prompt": false`, over the
@@ -119,7 +169,8 @@ GPUS=0,1,2,3 EXTRA="-sm tensor -devd ROCm0" BIN=~/mx-llama.cpp/build-r712/bin RO
 ```
 
 For prompt-heavy serving, also add `-b 2048 -ub 2048 --ctx-checkpoints 0`. TP4 prompt processing in the server goes
-from 845 to 1066 t/s, but without checkpoints the server can't reuse a cached prefix. The tables above don't use it.
+from 845 to 1066 t/s, but without checkpoints the server can't reuse a cached prefix after any change, which costs
+much more in a long agent conversation. The tables above don't use it.
 
 **4. Prefill, the 8-token verify forward and plain decode** (drop `-sm tensor` on one GPU):
 
@@ -199,8 +250,11 @@ did not work: [RESULTS.md](https://github.com/skyne98/ruquant/blob/main/RESULTS.
   activations, and it buys the int4 × int4 speed.
 - ROCm 7.12 is an alpha nightly (`7.12.0a20260225`), and AMD's gfx90X nightlies stopped in February 2026. ROCm 5.7
   gives identical outputs, ~3-10% slower.
-- The kernels are written for gfx906. The fork's CUDA path emulates dot8 and is only a correctness check. The ruquant
-  repo has a separate llama.cpp patch with a sm_80+ CUDA path, used for quality scoring on an RTX 3090.
+- The kernels are written for gfx906. On NVIDIA GPUs with INT4 tensor cores (Turing, Ampere, Ada; not Hopper or
+  Blackwell, which dropped INT4 MMA) the W4A4 matmuls and the 4-bit cache's attention run on `mma.sync .s4`, bit-exact
+  with the CPU. Measured on an RTX 3090 with the ruquant repo's llama.cpp build (`SERVER=1 ./build-llama.sh`): pp512
+  1493 t/s, DFlash2 decode 137 t/s on one GPU. The fork carries the same kernels and compiles for sm_75 / 86 / 89; its
+  own CUDA build has not been benchmarked. Other GPUs fall back to emulated dot8, which is slow.
 
 ## Credits and license
 
@@ -208,6 +262,7 @@ Apache-2.0, like its sources:
 - Qwen3.8-27B by Qwen;
 - the GGUF source and type map by unsloth;
 - the DFlash2 drafter by Inco AI;
+- the vision tower (in the projector) by Qwen, converted with llama.cpp's `convert_hf_to_gguf.py`;
 - the runtime builds on mx-llama.cpp (MIT) and llama.cpp (MIT).
 
 Methods: OSTQuant (Hu et al., 2025), GPTQ (Frantar et al., 2022), DFlash speculative decoding.

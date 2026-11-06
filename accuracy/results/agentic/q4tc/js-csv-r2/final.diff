@@ -1,0 +1,128 @@
+ src/parse.js       | 31 ++++++++++++++++++++++++-------
+ test/parse.test.js | 48 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 72 insertions(+), 7 deletions(-)
+
+diff --git a/src/parse.js b/src/parse.js
+index dd1a15d..11c9646 100644
+--- a/src/parse.js
++++ b/src/parse.js
+@@ -17,6 +17,7 @@ export function parse(text, { delimiter = "," } = {}) {
+   let inQuotes = false;
+   let wasQuoted = false;
+   let line = 1;
++  let fieldStartLine = 1;
+   let i = 0;
+ 
+   const endField = () => {
+@@ -34,32 +35,48 @@ export function parse(text, { delimiter = "," } = {}) {
+     const c = text[i];
+     if (inQuotes) {
+       if (c === '"') {
+-        inQuotes = false;
++        if (text[i + 1] === '"') {
++          // `""` inside a quoted field is an escaped quote.
++          field += '"';
++          i += 2;
++        } else {
++          inQuotes = false;
++          i++;
++        }
+       } else {
+         if (c === "\n") line++;
+         field += c;
++        i++;
+       }
+-      i++;
+       continue;
+     }
+     if (c === '"' && field === "" && !wasQuoted) {
+       inQuotes = true;
+       wasQuoted = true;
++      fieldStartLine = line;
+       i++;
+-    } else if (c === delimiter) {
+-      endField();
+-      i++;
++    } else if (c === "\r" && text[i + 1] === "\n") {
++      // CRLF is a single record separator; a lone CR is literal text.
++      endRecord();
++      line++;
++      i += 2;
+     } else if (c === "\n") {
+       endRecord();
+       line++;
+       i++;
++    } else if (c === delimiter) {
++      endField();
++      i++;
+     } else {
+       field += c;
+       i++;
+     }
+   }
+-  if (inQuotes) throw new CsvError("unterminated quoted field", line);
+-  if (field !== "") endRecord();
++  if (inQuotes) throw new CsvError("unterminated quoted field", fieldStartLine);
++  // A trailing line break leaves no pending record; any other leftover
++  // content (a non-empty field, an empty quoted field, or earlier fields of
++  // the same record) ends the final record.
++  if (field !== "" || wasQuoted || record.length > 0) endRecord();
+   return records;
+ }
+ 
+diff --git a/test/parse.test.js b/test/parse.test.js
+index 6358150..72f6b49 100644
+--- a/test/parse.test.js
++++ b/test/parse.test.js
+@@ -35,3 +35,51 @@ test("round trip", () => {
+ test("objects", () => {
+   assert.deepEqual(parseObjects("name,age\nann,31\nbob\n"), [{ name: "ann", age: "31" }, { name: "bob", age: "" }]);
+ });
++
++test("trailing delimiter leaves an empty final field", () => {
++  assert.deepEqual(parse("a,"), [["a", ""]]);
++});
++
++test("empty quoted field at end of input", () => {
++  assert.deepEqual(parse('a,""'), [["a", ""]]);
++});
++
++test("single empty quoted field", () => {
++  assert.deepEqual(parse('""'), [[""]]);
++});
++
++test("escaped quotes at field boundaries", () => {
++  assert.deepEqual(parse('"""a"""'), [['"a"']]);
++});
++
++test("quote inside an unquoted field is literal", () => {
++  assert.deepEqual(parse('a"b,c"d\nx'), [["a\"b", "c\"d"], ["x"]]);
++});
++
++test("CRLF separates records but a lone CR is literal", () => {
++  assert.deepEqual(parse("a\rb\r\nc\nd"), [["a\rb"], ["c"], ["d"]]);
++});
++
++test("quoted field keeps CRLF literal", () => {
++  assert.deepEqual(parse('"a\r\nb"'), [["a\r\nb"]]);
++});
++
++test("unterminated quote on the first line reports line 1", () => {
++  assert.throws(() => parse('"ab'), (e) => e instanceof CsvError && e.line === 1);
++});
++
++test("unterminated quote spanning lines reports the field's start line", () => {
++  assert.throws(() => parse('a\n"b\nc\nd'), (e) => e instanceof CsvError && e.line === 2);
++});
++
++test("empty input yields no records", () => {
++  assert.deepEqual(parse(""), []);
++});
++
++test("custom delimiter", () => {
++  assert.deepEqual(parse("a|b\n1|2", { delimiter: "|" }), [["a", "b"], ["1", "2"]]);
++});
++
++test("round trip keeps a lone CR via quoting", () => {
++  assert.deepEqual(parse(stringify([["a", "b\rc"]])), [["a", "b\rc"]]);
++});

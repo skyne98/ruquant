@@ -1,0 +1,18 @@
+$ cargo test --offline --test hidden_calc
+   Compiling calc v0.1.0 (/tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/q4tc/rust-expr-r2/check)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/hidden_calc.rs (target/debug/deps/hidden_calc-3ba8ec3623f8d6d5)
+
+running 7 tests
+test evaluation_errors ... ok
+test lexing_errors ... ok
+test numbers ... ok
+test parse_errors ... ok
+test parse_errors_come_before_evaluation_errors ... ok
+test precedence_and_associativity ... ok
+test variables_and_functions ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+[exit 0]

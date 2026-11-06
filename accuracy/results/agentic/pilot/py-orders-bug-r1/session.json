@@ -1,0 +1,1480 @@
+{
+  "info": {
+    "id": "ses_e4ee65623ffecT0xEADA05Ta2b",
+    "projectID": "abdbc49e480f9f7cdffe9304d1659be665e37329",
+    "model": {
+      "id": "qwen3.8-27b-w4a4",
+      "providerID": "llamacpp",
+      "variant": "default"
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 11266,
+      "output": 12215,
+      "reasoning": 0,
+      "cache": {
+        "read": 260863,
+        "write": 0
+      }
+    },
+    "outcome": "succeeded",
+    "time": {
+      "created": 1793972611568,
+      "updated": 1793972875993,
+      "busy": 1793972611627,
+      "idle": 1793972875994
+    },
+    "title": "py-orders-bug-r1",
+    "location": {
+      "directory": "/tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work"
+    }
+  },
+  "messages": [
+    {
+      "id": "msg_1b119a9fb0016lbP3bUmPBQ7eG",
+      "time": {
+        "created": 1793972611632
+      },
+      "text": "\"Customer support forwarded this bug report:\n\n> I ordered 12 notebooks (NB-A5, $2.50 each). The receipt shows \\\"Bulk discount (Notebook) -$3.00\\\", which is right\n> (10% off for 10 or more of an item), but I was charged $24.30 instead of $27.00. It looks like I got the bulk discount\n> twice, and the receipt doesn't add up: 12 x Notebook, Subtotal, the -$3.00 line and the Total don't match.\n\nFind the cause and fix it so that receipts add up and customers are charged correctly. Keep the receipt's discount line.\nAdd a regression test. The tests run with `python -m pytest`.\n\"",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_1b119aa34001cRccrKWGBBIpOt",
+      "time": {
+        "created": 1793972611638,
+        "streamed": 1793972631879,
+        "completed": 1793972631899
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Let's start by investigating the codebase to understand what we're dealing with.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972630844,
+            "completed": 1793972631876
+          }
+        },
+        {
+          "type": "tool",
+          "id": "OxbZBFg1U4XCMWmOhSOyCNv8d7bu2FBG",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "ls -la && git log --oneline -5 2>/dev/null | head"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "total 8\ndrwxr-xr-x 5 fox users   60 Nov  6 14:43 .\ndrwxr-xr-x 6 fox users   52 Nov  6 14:43 ..\ndrwxr-xr-x 7 fox users 4096 Nov  6 14:43 .git\n-rw-r--r-- 1 fox users  124 Nov  6 14:29 README.md\ndrwxr-xr-x 2 fox users  115 Nov  6 14:29 shop\ndrwxr-xr-x 2 fox users   27 Nov  6 14:29 tests\nabdbc49 initial\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793972631272,
+            "ran": 1793972631878,
+            "completed": 1793972631895
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "end": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 5922,
+        "output": 62,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b119f95f001dlGbjpYK6WES2e",
+      "time": {
+        "created": 1793972631905,
+        "streamed": 1793972633329,
+        "completed": 1793972633345
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Let's try exploring the shop directory and the tests directory.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972632655,
+            "completed": 1793972633327
+          }
+        },
+        {
+          "type": "tool",
+          "id": "QZF3FhaFebSoFzUkNXunYR5RrSn9wIfo",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "ls -la shop tests && cat README.md"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "shop:\ntotal 24\ndrwxr-xr-x 2 fox users  115 Nov  6 14:29 .\ndrwxr-xr-x 5 fox users   60 Nov  6 14:43 ..\n-rw-r--r-- 1 fox users 1097 Nov  6 14:29 checkout.py\n-rw-r--r-- 1 fox users 1442 Nov  6 14:29 discounts.py\n-rw-r--r-- 1 fox users   88 Nov  6 14:29 __init__.py\n-rw-r--r-- 1 fox users  796 Nov  6 14:29 models.py\n-rw-r--r-- 1 fox users  292 Nov  6 14:29 money.py\n-rw-r--r-- 1 fox users  443 Nov  6 14:29 pricing.py\n\ntests:\ntotal 4\ndrwxr-xr-x 2 fox users  27 Nov  6 14:29 .\ndrwxr-xr-x 5 fox users  60 Nov  6 14:43 ..\n-rw-r--r-- 1 fox users 925 Nov  6 14:29 test_basic.py\n# shop\n\nProducts, orders, discounts and receipts for the store's back office. Money is integer cents.\n\n    python -m pytest\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793972633058,
+            "ran": 1793972633329,
+            "completed": 1793972633342
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "end": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 186,
+        "output": 49,
+        "reasoning": 0,
+        "cache": {
+          "read": 5983,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b119ff05001HOgxN015k7aOxV",
+      "time": {
+        "created": 1793972633351,
+        "streamed": 1793972636755,
+        "completed": 1793972636765
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "I'll try reading all the source files.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972634710,
+            "completed": 1793972636743
+          }
+        },
+        {
+          "type": "tool",
+          "id": "PG6RavM78249abCh389w8LYOeRCQbqWe",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "shop/checkout.py"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file shop/checkout.py, lines 1-27\n1: from .discounts import bulk, category, coupon\n2: from .models import Order\n3: from .money import fmt\n4: from .pricing import line_total, subtotal\n5: \n6: TAX_PERCENT = 0  # prices include tax\n7: \n8: \n9: def discounts(order: Order, coupon_code: str | None = None) -> list[tuple[str, int]]:\n10:     found = bulk(order) + category(order)\n11:     after = subtotal(order) - sum(amount for _, amount in found)\n12:     return found + coupon(coupon_code, after)\n13: \n14: \n15: def total(order: Order, coupon_code: str | None = None) -> int:\n16:     return max(0, subtotal(order) - sum(amount for _, amount in discounts(order, coupon_code)))\n17: \n18: \n19: def receipt(order: Order, coupon_code: str | None = None) -> str:\n20:     lines = [f\"Receipt for {order.customer}\"]\n21:     for item in order.items:\n22:         lines.append(f\"  {item.qty} x {item.product.name:<20} {fmt(line_total(item)):>10}\")\n23:     lines.append(f\"  {'Subtotal':<24} {fmt(subtotal(order)):>10}\")\n24:     for label, amount in discounts(order, coupon_code):\n25:         lines.append(f\"  {label:<24} {fmt(-amount):>10}\")\n26:     lines.append(f\"  {'Total':<24} {fmt(total(order, coupon_code)):>10}\")\n27:     return \"\\n\".join(lines)"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972635045,
+            "ran": 1793972636744,
+            "completed": 1793972636757
+          }
+        },
+        {
+          "type": "tool",
+          "id": "ZZDNyVGPSWbTkRNqxFwlduDhxyKuEUWn",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "shop/discounts.py"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file shop/discounts.py, lines 1-47\n1: \"\"\"Order-level discounts. Each rule returns (label, amount in cents) pairs; amounts are positive.\"\"\"\n2: from .models import Order\n3: from .money import percent_of\n4: from .pricing import BULK_MIN_QTY, BULK_PERCENT\n5: \n6: CATEGORY_PROMOS = {\"books\": 5}\n7: \n8: COUPONS = {\n9:     \"WELCOME5\": (\"fixed\", 500),\n10:     \"SAVE15\": (\"percent\", 15),\n11: }\n12: \n13: \n14: class InvalidCoupon(ValueError):\n15:     pass\n16: \n17: \n18: def bulk(order: Order) -> list[tuple[str, int]]:\n19:     out = []\n20:     for item in order.items:\n21:         if item.qty >= BULK_MIN_QTY:\n22:             gross = item.product.price_cents * item.qty\n23:             out.append((f\"Bulk discount ({item.product.name})\", percent_of(gross, BULK_PERCENT)))\n24:     return out\n25: \n26: \n27: def category(order: Order) -> list[tuple[str, int]]:\n28:     out = []\n29:     for cat, percent in CATEGORY_PROMOS.items():\n30:         gross = sum(i.product.price_cents * i.qty for i in order.items if i.product.category == cat)\n31:         if gross:\n32:             out.append((f\"{cat.title()} promo {percent}%\", percent_of(gross, percent)))\n33:     return out\n34: \n35: \n36: def coupon(code: str | None, amount_after_other_discounts: int) -> list[tuple[str, int]]:\n37:     if code is None:\n38:         return []\n39:     try:\n40:         kind, value = COUPONS[code.upper()]\n41:     except KeyError:\n42:         raise InvalidCoupon(code) from None\n43:     if kind == \"fixed\":\n44:         off = min(value, amount_after_other_discounts)\n45:     else:\n46:         off = percent_of(amount_after_other_discounts, value)\n47:     return [(f\"Coupon {code.upper()}\", off)]"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972635314,
+            "ran": 1793972636745,
+            "completed": 1793972636758
+          }
+        },
+        {
+          "type": "tool",
+          "id": "Eaad9h4BuxwtHOAkkZk4pcPOalstCFT7",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "shop/models.py"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file shop/models.py, lines 1-36\n1: from dataclasses import dataclass, field\n2: \n3: \n4: @dataclass(frozen=True)\n5: class Product:\n6:     sku: str\n7:     name: str\n8:     price_cents: int\n9:     category: str = \"general\"\n10: \n11: \n12: @dataclass\n13: class LineItem:\n14:     product: Product\n15:     qty: int\n16: \n17:     def __post_init__(self):\n18:         if self.qty <= 0:\n19:             raise ValueError(f\"quantity must be positive, got {self.qty}\")\n20: \n21: \n22: @dataclass\n23: class Order:\n24:     customer: str\n25:     items: list[LineItem] = field(default_factory=list)\n26: \n27:     def add(self, product: Product, qty: int = 1) -> None:\n28:         for item in self.items:\n29:             if item.product.sku == product.sku:\n30:                 item.qty += qty\n31:                 return\n32:         self.items.append(LineItem(product, qty))\n33: \n34:     @property\n35:     def n_units(self) -> int:\n36:         return sum(item.qty for item in self.items)"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972635588,
+            "ran": 1793972636748,
+            "completed": 1793972636760
+          }
+        },
+        {
+          "type": "tool",
+          "id": "T7CsArdV5CBNCE6P1A0BnaAjnodo31a9",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "shop/money.py"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file shop/money.py, lines 1-9\n1: def percent_of(cents: int, percent: int) -> int:\n2:     \"\"\"percent% of an amount in cents, rounded half up.\"\"\"\n3:     return (cents * percent + 50) // 100\n4: \n5: \n6: def fmt(cents: int) -> str:\n7:     sign = \"-\" if cents < 0 else \"\"\n8:     cents = abs(cents)\n9:     return f\"{sign}${cents // 100}.{cents % 100:02d}\""
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972635795,
+            "ran": 1793972636749,
+            "completed": 1793972636759
+          }
+        },
+        {
+          "type": "tool",
+          "id": "k0BjMctJpti1kSZ6ycWYVUUyP7fPBVKB",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "shop/pricing.py"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file shop/pricing.py, lines 1-17\n1: from .models import LineItem, Order\n2: from .money import percent_of\n3: \n4: BULK_MIN_QTY = 10\n5: BULK_PERCENT = 10\n6: \n7: \n8: def line_total(item: LineItem) -> int:\n9:     \"\"\"Price of one line before order-level discounts.\"\"\"\n10:     total = item.product.price_cents * item.qty\n11:     if item.qty >= BULK_MIN_QTY:\n12:         total -= percent_of(total, BULK_PERCENT)\n13:     return total\n14: \n15: \n16: def subtotal(order: Order) -> int:\n17:     return sum(line_total(item) for item in order.items)"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972636064,
+            "ran": 1793972636750,
+            "completed": 1793972636759
+          }
+        },
+        {
+          "type": "tool",
+          "id": "gQCpHH0awyOZ2AZmAj88p3RiO5DrgAHx",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "shop/__init__.py"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file shop/__init__.py, lines 1-1\n1: \"\"\"A tiny shop: products, orders, discounts and receipts. Money is in integer cents.\"\"\""
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972636267,
+            "ran": 1793972636753,
+            "completed": 1793972636761
+          }
+        },
+        {
+          "type": "tool",
+          "id": "wBCp65pJxH4DM9l8QNZl6P8FCx2MujCg",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "tests/test_basic.py"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file tests/test_basic.py, lines 1-47\n1: import pytest\n2: \n3: from shop.checkout import receipt, total\n4: from shop.discounts import InvalidCoupon\n5: from shop.models import Order, Product\n6: \n7: PEN = Product(\"PEN-1\", \"Pen\", 150)\n8: NOVEL = Product(\"BK-7\", \"Novel\", 1299, \"books\")\n9: \n10: \n11: def test_simple_total():\n12:     o = Order(\"ann\")\n13:     o.add(PEN, 3)\n14:     assert total(o) == 450\n15: \n16: \n17: def test_add_merges_lines():\n18:     o = Order(\"ann\")\n19:     o.add(PEN, 2)\n20:     o.add(PEN, 1)\n21:     assert len(o.items) == 1 and o.items[0].qty == 3\n22: \n23: \n24: def test_books_promo():\n25:     o = Order(\"bob\")\n26:     o.add(NOVEL, 2)\n27:     assert total(o) == 2598 - 130\n28: \n29: \n30: def test_fixed_coupon():\n31:     o = Order(\"cy\")\n32:     o.add(PEN, 2)\n33:     assert total(o, \"welcome5\") == 0\n34: \n35: \n36: def test_bad_coupon():\n37:     o = Order(\"cy\")\n38:     o.add(PEN)\n39:     with pytest.raises(InvalidCoupon):\n40:         total(o, \"NOPE\")\n41: \n42: \n43: def test_receipt_lists_items():\n44:     o = Order(\"dee\")\n45:     o.add(PEN, 2)\n46:     text = receipt(o)\n47:     assert \"2 x Pen\" in text and \"$3.00\" in text"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972636538,
+            "ran": 1793972636754,
+            "completed": 1793972636762
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "end": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 361,
+        "output": 201,
+        "reasoning": 0,
+        "cache": {
+          "read": 6217,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11a0c60001gs6ntBinDuwNHL",
+      "time": {
+        "created": 1793972636770,
+        "streamed": 1793972713180,
+        "completed": 1793972713194
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Now I understand the bug. Let me trace through the customer's scenario:\n\n- 12 notebooks (NB-A5), $2.50 each → 12 × 250 = 3000 cents = $30.00 gross.\n- Bulk discount: qty 12 >= 10, so 10% off gross = 10% of 3000 = 300 cents = $3.00.\n\nNow the double-counting:\n\n1. `line_total(item)` in pricing.py already subtracts the bulk discount when qty >= BULK_MIN_QTY: total = 3000 - 300 = 2700. So `line_total` = $27.00.\n2. `subtotal(order)` = sum of line_totals = 2700.\n3. `bulk(order)` in discounts.py adds another bulk discount: gross = 250*12 = 3000, percent_of(3000, 10) = 300. So discount = $3.00.\n4. `total(order)` = subtotal - sum(discounts) = 2700 - 300 = 2400 = $24.00.\n\nWait, the customer was charged $24.30. Hmm, let me recompute. Actually, wait — let me recompute. 12 × $2.50 = $30.00. 10% bulk discount = $3.00. Expected = $27.00.\n\nThe customer says they were charged $24.30. Hmm, that's $27.00 - $2.70. $2.70 = 10% of $27.00. Interesting — so the discount was applied on the *already-discounted* amount?\n\nWait, let me recompute. `line_total` = 2700 (already discounted). `subtotal` = 2700. `bulk` discount = percent_of(3000, 10) = 300. total = 2700 - 300 = 2400 = $24.00.\n\nHmm, that gives $24.00, not $24.30. Let me re-check.\n\nActually wait. Let me reconsider. Hmm, $24.30. Let me think about what would produce $24.30.\n\n$30.00 gross.\n- $30.00 - $3.00 = $27.00 (expected, single discount)\n- $24.30 = $27.00 - $2.70. And $2.70 = 10% of $27.00.\n\nSo if the discount is computed as 10% of the *post-bulk-discount* amount (2700), it's 270, and 2700 - 270 = 2430 = $24.30. That matches!\n\nSo the actual behavior: `line_total` subtracts 10% → 2700. Then the `bulk` discount... hmm, but `bulk` computes gross = price*qty = 3000, discount = 300. total = 2700 - 300 = 2400.\n\nHmm, that's $24.00, not $24.30. Let me re-check.\n\nActually wait — maybe I'm misreading. Let me recompute percent_of(3000, 10) = (3000*10 + 50) // 100 = (30000+50)//100 = 30050//100 = 300. Yes, 300.\n\nSo total = 2700 - 300 = 2400 = $24.00.\n\nBut the customer reports $24.30. There's a discrepancy. Let me reconsider.\n\nHmm. Maybe the customer's report is approximate, or the numbers are slightly different. But the key point is: the discount is being applied twice. The receipt shows:\n- 12 x Notebook: line_total = 2700 = $27.00 (already discounted!)\n- Subtotal: 2700 = $27.00\n- Bulk discount (Notebook): -$3.00\n- Total: $24.00\n\nSo the receipt is internally inconsistent: the line shows 12 x Notebook = $27.00, but that's not 12 × $2.50 = $30.00. And the bulk discount of $3.00 is listed on top of a subtotal that has already been reduced by $3.00. So the total is $24.00, but the customer says $24.30.\n\nHmm, wait. Let me reconsider whether the customer's $24.30 is accurate. Actually, the important thing is the bug: double-counting. The exact dollar amount in the report may not match perfectly due to rounding or my arithmetic. Let me re-check: could the intended \"correct\" answer be $27.00, and the buggy output be $24.00? The customer says \"I was charged $24.30 instead of $27.00.\"\n\nLet me carefully recompute with the actual code to see what it actually produces. I'll just run it.\n\nActually, let me reconsider the numbers. Maybe there's rounding involved. 10% of 3000 = 300 exactly. No rounding.\n\nLet me just run the code to confirm. I'll write a quick script.\n\nActually, let me reconsider. Maybe the customer's numbers are a bit off, or it's a constructed scenario. The key requirement is: \"Find the cause and fix it so that the receipt is internally consistent and the customer is charged correctly. Keep the receipt's discount line.\"\n\nSo the fix: the bulk discount is being applied twice — once in `line_total` (pricing.py) and once in `bulk` (discounts.py) via the checkout. We need to apply it only once.\n\nThere are a few options:\n1. Remove the discount from `line_total` (make it just price*qty), so that line items show the gross amount, and the bulk discount is applied once at the order level.\n2. Remove the bulk discount from `discounts.bulk` so that it's applied only in line_total.\n\nWhich is better? The receipt should \"internally be consistent.\" Let's think about what \"internally consistent\" means. The receipt lists:\n- each line item: `12 x Notebook $27.00`\n- Subtotal\n- discount lines\n- Total\n\nFor the receipt to add up: sum of line items = subtotal, and subtotal - discounts = total.\n\nOption 1: line_total = gross (12*250 = 3000 = $30.00). Subtotal = $30.00. Discount bulk = $3.00. Total = $27.00. Receipt: 12 x Notebook $30.00, Subtotal $30.00, Bulk -$3.00, Total $27.00. This adds up cleanly and matches the customer's expectation of $27.00.\n\nOption 2: line_total already discounted = $27.00. Subtotal = $27.00. No discount line. Total = $27.00. But then there's no discount line, and the customer explicitly says \"keep the receipt's discount line.\" Also, the line would show 12 x Notebook = $27.00, which is confusing (it looks like the per-unit price is $2.25).\n\nSo Option 1 is the right fix: make `line_total` return the gross amount (price × qty) and apply the bulk discount exactly once at the order level in `discounts.bulk`.\n\nBut wait — I need to be careful. The `line_total` docstring says \"price of one line before order-level discounts.\" So the intent is that line_total should be the gross amount before order-level discounts! The bulk discount is an order-level discount (it lives in discounts.py). So the bug is that `line_total` is also applying the bulk discount. The docstring confirms the intent: line_total should be the gross amount before order-level discounts.\n\nSo the fix: remove the bulk-discount subtraction from `line_total`.\n\nLet me verify the whole flow with the fix:\n\n- `line_total(item)` = price*qty = 250*12 = 3000 = $30.00.\n- `subtotal(order)` = 3000 = $30.00.\n- `discounts(order)`:\n  - `bulk(order)`: qty 12 >= 10, gross = 3000, discount = percent_of(3000, 10) = 300 = $3.00. → [(\"Bulk discount (Notebook)\", 300)]\n  - `category(order)`: notebooks — what's the category? NB-A5. In the test, products have a category. The notebook's category is probably \"general\" (default). CATEGORY_PROMOS = {\"books\": 5}. So notebooks are \"general\" → no category promo. So category returns [].\n  - `coupon(None, after)`: None → [].\n  - So found = [(\"Bulk discount (Notebook)\", 300)]. after = subtotal - 300 = 2700.\n  - return [(\"Bulk discount (Notebook)\", 300)].\n- `total(order)` = max(0, 3000 - 300) = 2700 = $27.00.\n\nReceipt:\n```\nReceipt for <customer>\n  12 x Notebook              $30.00\n  Subtotal                   $30.00\n  Bulk discount (Notebook)   -$3.00\n  Total                      $27.00\n```\n\nThis adds up: 30.00 - 3.00 = 27.00. And it matches the customer's expected $27.00.\n\nNow let me double-check that the existing tests still pass with this change.\n\ntest_simple_total: PEN, qty 3. line_total = 150*3 = 450 (3 < 10, no bulk). subtotal = 450. discounts: bulk: qty 3 < 10, none. category: PEN's category is \"general\" → none. coupon None. total = 450. assert total == 450. ✓ (same as before, since qty<10 means line_total wasn't discounting anyway).\n\ntest_books_promo: NOVEL (books), qty 2. line_total = 1299*2 = 2598 (2<10, no bulk). subtotal = 2598. discounts: bulk none. category: books, gross = 2598, percent_of(2598,5) = (2598*5+50)//100 = (12990+50)//100 = 13040//100 = 130. So category returns 130. total = 2598 - 130 = 2468. assert total == 2598-130 = 2468. ✓\n\ntest_fixed_coupon: PEN qty 2, coupon \"welcome5\". line_total = 300. subtotal = 300. discounts: bulk none, category none (general). after = 300 - 0 = 300. coupon(\"welcome5\", 300): fixed 500, off = min(500, 300) = 300. So discount = 300. total = max(0, 300 - 300) = 0. assert total == 0. ✓\n\ntest_bad_coupon: raises InvalidCoupon. ✓ (no change)\n\ntest_receipt_lists_items: PEN qty 2. text contains \"2 x Pen\" and \"$3.00\". line_total = 150*2 = 300 = $3.00. ✓\n\nGood, all existing tests pass.\n\nNow, the customer's scenario: the notebook's category. Let me check — in the test, NOVEL's category is \"books\". The notebook NB-A5 — what category? It's not shown, so it's probably the default \"general\". So no books promo applies. Good.\n\nBut wait, I should double-check: what if the notebook's category were \"books\"? Then a category promo would also apply. But the customer's report only mentions the bulk discount. So the notebook is \"general\". Good.\n\nNow, let me reconsider the exact charged amount. The customer says $24.30. With the current buggy code, what is it? Let me compute: line_total = 3000 - 300 = 2700. subtotal = 2700. bulk discount = 300. total = 2700 - 300 = 2400 = $24.00. So the buggy code produces $24.00, not $24.30.\n\nHmm. So there's a discrepancy between the customer's report ($24.30) and the actual buggy output ($24.00). Let me re-read the customer's report.\n\n\"I ordered 12 notebooks (NB-A5, $2.50 each). The receipt shows 'Bulk discount (Notebook) -$3.00', which is correct (10% off on 10+ of an item), but I was charged $24.30 instead of $27.00.\"\n\nHmm. So the customer claims $24.30. But the code produces $24.00. Let me run the code to confirm. Maybe I'm making an arithmetic mistake. Let me just run it.\n\nActually, let me reconsider. Maybe the notebook is in the \"books\" category, and there's also a books promo? Let me see: if the notebook is \"books\":\n- gross = 3000.\n- bulk discount = 300 (10%).\n- category books promo = 5% of 3000 = 150.\n- With the bug: line_total = 2700, subtotal = 2700, discounts = bulk 300 + category 150 = 450. total = 2700 - 450 = 2250 = $22.50. That's not $24.30 either.\n\nHmm. So neither matches $24.30. Let me reconsider.\n\nWhat produces $24.30? $24.30 = 2430 cents.\n- 3000 - 2430 = 570. So total discount = 570.\n- If the bulk discount is 300 (10% of 3000) plus another 270 (10% of 2700). 300+270 = 570. 3000 - 570 = 2430. That's it!\n\nSo $24.30 corresponds to: gross 3000, subtract 300 (bulk on gross), subtract 270 (bulk on the already-discounted amount). That's applying the bulk discount twice, but the second time on the reduced amount.\n\nHmm, but that's not what the current code does. The current code subtracts 300 inside line_total (via percent_of on gross) and subtracts 300 again (via bulk) at the order level. Total discount = 600, total = 2400 = $24.00.\n\nSo the customer's $24.30 doesn't match the current code's $24.00. Interesting.\n\nWait, maybe I should run the code to be sure. Let me not guess. Let me write a quick reproduction.\n\nActually, maybe the customer's report is just a bit inaccurate / a constructed narrative, and the exact number isn't critical. The task says \"Find the cause and fix it so that the receipt is internally consistent and the customer is charged correctly.\" The key is the double discount. The customer's exact number may be illustrative.\n\nBut I want to be accurate. Let me run the actual code to see what it produces. Let me write a reproduction script and run pytest.\n\nLet me reconsider: is there any other path that could produce $24.30? Let me think about `coupon`. No, the customer has no coupon.\n\nActually, maybe the intended reading is: the customer's numbers are slightly off (realistic — a customer might misreport), and the real bug is the double discount. My job is to fix the double discount so the total is $27.00 and the receipt adds up. The exact number in the report is not important for the fix.\n\nBut to be safe, let me run the code and confirm the actual buggy output. That way I can state it precisely.\n\nLet me write a reproduction script.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972644064,
+            "completed": 1793972713177
+          }
+        },
+        {
+          "type": "text",
+          "text": "Let me reproduce the bug with the customer's exact scenario before I change anything."
+        },
+        {
+          "type": "tool",
+          "id": "6aDcD65zoSLFHnZsQrvh49BwR60zSiIW",
+          "name": "execute",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "code": "\n// Run a quick repro of the customer's scenario in the repo's Python.\n// We'll do this via the shell tool instead, but first confirm the file layout.\nreturn \"will use shell\";\n"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "will use shell"
+              }
+            ],
+            "metadata": {
+              "toolCalls": [],
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972711573,
+            "ran": 1793972713179,
+            "completed": 1793972713191
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "end": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 2178,
+        "output": 4003,
+        "reasoning": 0,
+        "cache": {
+          "read": 6778,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11b36ee0013uapZTNonAbgNk",
+      "time": {
+        "created": 1793972713200,
+        "streamed": 1793972718628,
+        "completed": 1793972718654
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Let's actually run the reproduction using shell.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972713438,
+            "completed": 1793972718625
+          }
+        },
+        {
+          "type": "tool",
+          "id": "siLoKFe1VsdcZpke4YfTzGNJ0jk5MT0o",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "cd /tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work && cat > /tmp/repro.py <<'EOF'\nimport sys\nsys.path.insert(0, \".\")\nfrom shop.models import Order, Product\nfrom shop.checkout import receipt, total\nfrom shop.pricing import line_total, subtotal\nfrom shop.discount import bulk  # noqa\nEOF\necho \"--- check discounts module name ---\"\npython - <<'EOF'\nfrom shop.models import Order, Product\nfrom shop.checkout import receipt, total, discounts\nfrom shop.pricing import line_total, subtotal\n\nNB = Product(\"NB-A5\", \"Notebook\", 250)\no = Order(\"cust\")\no.add(NB, 12)\nprint(\"line_total:\", line_total(o.items[0]))\nprint(\"subtotal  :\", subtotal(o))\nprint(\"discounts :\", discounts(o))\nprint(\"total     :\", total(o))\nprint()\nprint(receipt(o))\nEOF"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "--- check discounts module name ---\nline_total: 2700\nsubtotal  : 2700\ndiscounts : [('Bulk discount (Notebook)', 300)]\ntotal     : 2400\n\nReceipt for cust\n  12 x Notebook                 $27.00\n  Subtotal                     $27.00\n  Bulk discount (Notebook)     -$3.00\n  Total                        $24.00\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793972713857,
+            "ran": 1793972718627,
+            "completed": 1793972718651
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "end": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 19,
+        "output": 301,
+        "reasoning": 0,
+        "cache": {
+          "read": 12958,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11b4c42001pr4jomn4Zqj8xX",
+      "time": {
+        "created": 1793972718660,
+        "streamed": 1793972736204,
+        "completed": 1793972736238
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Confirmed. Current buggy behavior:\n- line_total = $27.00 (the 10% bulk discount has already been deducted inside line_total)\n- Subtotal = $27.00\n- Bulk discount line = -$3.00 (applied again at the order level)\n- Total = $24.00\n\nSo the bulk discount is being applied twice: once inside `line_total` (pricing.py), and again in `discounts.bulk` (via checkout). The customer says $24.30, but the code outputs $24.00. The customer's exact number is slightly off, but the diagnosis is exactly right: double discount, and the receipt doesn't add up ($27.00 - $3.00 = $24.00 ≠ $24.30, and 12 × $2.50 = $30.00 ≠ the line's $27.00).\n\nRoot cause: `line_total` in pricing.py subtracts the bulk discount, but the docstring says \"the price of a single line item before order-level discounts,\" and `bulk` in discounts.py applies the same discount as an order-level discount. Double application.\n\nFix: make `line_total` return the gross price (price × qty) without the bulk discount. The bulk discount should be applied exactly once at the order level (discounts.py → checkout).\n\nLet's make the fix.\n\nCurrent pricing.py:\n```python\ndef line_total(item: LineItem) -> int:\n    \"\"\"Price of one line before order-level discounts.\"\"\"\n    total = item.product.price_cents * item.qty\n    if item.qty >= BULK_MIN_QTY:\n        total -= percent_of(total, BULK_PERCENT)\n    return total\n```\n\nFix:\n```python\ndef line_total(item: LineItem) -> int:\n    \"\"\"Price of one line before order-level discounts.\"\"\"\n    return item.product.price_cents * item.qty\n```\n\nAfter that, the imports in pricing.py may become unused: `percent_of` and `BULK_PERCENT`/`BULK_MIN_QTY`? Wait, `BULK_MIN_QTY` and `BULK_PERCENT` are defined in pricing.py itself, and imported by discounts.py (`from .pricing import BULK_MIN_QTY, BULK_PERCENT`). So keep the constants. But after the fix, `percent_of` in pricing.py will be unused, so I should remove that import to keep things clean. Let me check: pricing.py imports `from .money import percent_of`. If I remove its use, that import becomes unused. Let's remove it.\n\nActually, let me check whether percent_of is used elsewhere in pricing.py. Only in line_total. So after the fix, remove the import.\n\nLet me write the fix.\n\nNew pricing.py:\n```python\nfrom .models import LineItem, Order\n\nBULK_MIN_QTY = 10\nBULK_PERCENT = 10\n\n\ndef line_total(item: LineItem) -> int:\n    \"\"\"Price of one line before order-level discounts.\"\"\"\n    return item.product.price_cents * item.qty\n\n\ndef subtotal(order: Order) -> int:\n    return sum(line_total(item) for item in order.items)\n```\n\nThis keeps BULK_MIN_QTY and BULK_PERCENT (used by discounts.py). Remove the now-unused percent_of import.\n\nLet's apply the edit.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972719269,
+            "completed": 1793972736202
+          }
+        },
+        {
+          "type": "text",
+          "text": "Confirmed the bug. The bulk discount is applied **twice**:\n\n1. **In `line_total`** (`pricing.py`): it subtracts the 10% bulk discount, so the line shows `$27.00` instead of the gross `$30.00`.\n2. **In `discounts.bulk`** (`discounts.py`, applied via `checkout`): it subtracts the same `$3.00` again as an order-level line.\n\nResult: `line_total` docstring even says *\"before order-level discounts\"*, yet it bakes the discount in. So `subtotal` = $27.00 already includes the discount, and the receipt then subtracts another $3.00 → $24.00, and the receipt doesn't add up.\n\nLet me confirm the constants are only used where I expect, then apply the fix."
+        },
+        {
+          "type": "tool",
+          "id": "TQcjrn3S3OpSrTylKjtOnF7bRcYV8jGL",
+          "name": "grep",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "pattern": "BULK_MIN_QTY|BULK_PERCENT|percent_of|line_total",
+              "include": "*.py"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Found 16 matches\n/tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work/shop/checkout.py:\n  Line 4: from .pricing import line_total, subtotal\n\n  Line 22:         lines.append(f\"  {item.qty} x {item.product.name:<20} {fmt(line_total(item)):>10}\")\n\n\n/tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work/shop/discounts.py:\n  Line 3: from .money import percent_of\n\n  Line 4: from .pricing import BULK_MIN_QTY, BULK_PERCENT\n\n  Line 21:         if item.qty >= BULK_MIN_QTY:\n\n  Line 23:             out.append((f\"Bulk discount ({item.product.name})\", percent_of(gross, BULK_PERCENT)))\n\n  Line 32:             out.append((f\"{cat.title()} promo {percent}%\", percent_of(gross, percent)))\n\n  Line 46:         off = percent_of(amount_after_other_discounts, value)\n\n\n/tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work/shop/pricing.py:\n  Line 2: from .money import percent_of\n\n  Line 4: BULK_MIN_QTY = 10\n\n  Line 5: BULK_PERCENT = 10\n\n  Line 8: def line_total(item: LineItem) -> int:\n\n  Line 11:     if item.qty >= BULK_MIN_QTY:\n\n  Line 12:         total -= percent_of(total, BULK_PERCENT)\n\n  Line 17:     return sum(line_total(item) for item in order.items)\n\n\n/tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work/shop/money.py:\n  Line 1: def percent_of(cents: int, percent: int) -> int:\n"
+              }
+            ],
+            "metadata": {
+              "matches": 16,
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972735704,
+            "ran": 1793972736203,
+            "completed": 1793972736231
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "end": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 118,
+        "output": 976,
+        "reasoning": 0,
+        "cache": {
+          "read": 13277,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11b90f2001STr3LTcub0Ovw1",
+      "time": {
+        "created": 1793972736244,
+        "streamed": 1793972742808,
+        "completed": 1793972742824
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Confirmed: `BULK_MIN_QTY` and `BULK_PERCENT` are defined in pricing.py, and discounts.py imports them from pricing. `percent_of` is used in pricing.py (line_total) and discounts.py. After my fix, pricing.py no longer needs `percent_of`.\n\nApplying the fix:",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972738495,
+            "completed": 1793972742806
+          }
+        },
+        {
+          "type": "text",
+          "text": "The fix is to make `line_total` return the **gross** price (matching its docstring \"before order-level discounts\"), so the bulk discount is applied exactly once, at the order level in `discounts.bulk`."
+        },
+        {
+          "type": "tool",
+          "id": "JpRS8YchDxiGTmgy9uSI4k0oN0ELdRiN",
+          "name": "edit",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "shop/pricing.py",
+              "oldString": "from .models import LineItem, Order\nfrom .money import percent_of\n\nBULK_MIN_QTY = 10\nBULK_PERCENT = 10\n\n\ndef line_total(item: LineItem) -> int:\n    \"\"\"Price of one line before order-level discounts.\"\"\"\n    total = item.product.price_cents * item.qty\n    if item.qty >= BULK_MIN_QTY:\n        total -= percent_of(total, BULK_PERCENT)\n    return total",
+              "newString": "from .models import LineItem, Order\n\nBULK_MIN_QTY = 10\nBULK_PERCENT = 10\n\n\ndef line_total(item: LineItem) -> int:\n    \"\"\"Price of one line before order-level discounts.\"\"\"\n    return item.product.price_cents * item.qty"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Edited shop/pricing.py (1 replacement)"
+              }
+            ],
+            "metadata": {
+              "files": [
+                {
+                  "file": "shop/pricing.py",
+                  "patch": "Index: shop/pricing.py\n===================================================================\n--- shop/pricing.py\n+++ shop/pricing.py\n@@ -1,17 +1,13 @@\n from .models import LineItem, Order\n-from .money import percent_of\n \n BULK_MIN_QTY = 10\n BULK_PERCENT = 10\n \n \n def line_total(item: LineItem) -> int:\n     \"\"\"Price of one line before order-level discounts.\"\"\"\n-    total = item.product.price_cents * item.qty\n-    if item.qty >= BULK_MIN_QTY:\n-        total -= percent_of(total, BULK_PERCENT)\n-    return total\n+    return item.product.price_cents * item.qty\n \n \n def subtotal(order: Order) -> int:\n     return sum(line_total(item) for item in order.items)\n",
+                  "status": "modified",
+                  "additions": 1,
+                  "deletions": 5
+                }
+              ],
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972740894,
+            "ran": 1793972742807,
+            "completed": 1793972742814
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "9bd3642493aaa0ddaec31ead445ca5791a80fd77",
+        "end": "ca1c8a585f2fcf80f62cdc02d2dbfd9c66dbd94c",
+        "files": [
+          "shop/pricing.py"
+        ]
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 631,
+        "output": 323,
+        "reasoning": 0,
+        "cache": {
+          "read": 14370,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11baaac001iAWGy5dY3g9927",
+      "time": {
+        "created": 1793972742829,
+        "streamed": 1793972748404,
+        "completed": 1793972748430
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Okay, let's re-run the reproduction steps and confirm that the fix works.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972743182,
+            "completed": 1793972748401
+          }
+        },
+        {
+          "type": "text",
+          "text": "Now verify the fix against the customer's scenario:"
+        },
+        {
+          "type": "tool",
+          "id": "gRNQhLUVpkoz6n1UwIqYtt5PTzS1oe9n",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "cd /tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work && python - <<'EOF'\nfrom shop.models import Order, Product\nfrom shop.checkout import receipt, total, discounts\nfrom shop.pricing import line_total, subtotal\n\nNB = Product(\"NB-A5\", \"Notebook\", 250)\no = Order(\"cust\")\no.add(NB, 12)\nprint(\"line_total:\", line_total(o.items[0]))\nprint(\"subtotal  :\", subtotal(o))\nprint(\"discounts :\", discounts(o))\nprint(\"total     :\", total(o))\nprint()\nprint(receipt(o))\nEOF"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "line_total: 3000\nsubtotal  : 3000\ndiscounts : [('Bulk discount (Notebook)', 300)]\ntotal     : 2700\n\nReceipt for cust\n  12 x Notebook                 $30.00\n  Subtotal                     $30.00\n  Bulk discount (Notebook)     -$3.00\n  Total                        $27.00\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793972743752,
+            "ran": 1793972748402,
+            "completed": 1793972748427
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "ca1c8a585f2fcf80f62cdc02d2dbfd9c66dbd94c",
+        "end": "ca1c8a585f2fcf80f62cdc02d2dbfd9c66dbd94c",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 25,
+        "output": 248,
+        "reasoning": 0,
+        "cache": {
+          "read": 15323,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11bc092001pMOD1D4DlIfhxh",
+      "time": {
+        "created": 1793972748436,
+        "streamed": 1793972830887,
+        "completed": 1793972830899
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "The fix is working. Now:\n- line_total = $30.00 (gross)\n- Subtotal = $30.00\n- Bulk discount = -$3.00 (applied only once)\n- Total = $27.00 ✓ (matches the customer's expected value)\n\nThe receipt is now internally consistent: 12 × $2.50 = $30.00, minus $3.00 = $27.00. The discount line is preserved as requested.\n\nNext, I'll add a regression test. The test should do the following:\n1. Build the customer's exact scenario (12 notebooks @ $2.50).\n2. Assert that the total is $27.00 (2700 cents) — i.e., the discount is applied exactly once.\n3. Assert that the receipt is internally consistent — the sum of line items matches the subtotal, and the subtotal minus the discount equals the total.\n\nLet me think about a robust way to assert that \"the receipt is internally consistent.\" I could parse the receipt, but that's fragile. A better approach: assert the key invariants via the API, and additionally check that the receipt text contains the correct total and discount line.\n\nActually, a good regression test would:\n- Assert `total(o) == 2700` (2700 = 12*250 - 10% of 12*250). This directly pins down \"discount is applied only once.\"\n- Assert the receipt's consistency: subtotal - sum(discounts) == total, and sum(line_totals) == subtotal.\n- Assert that the receipt text contains the discount line (\"Bulk discount (Notebook)\") and the total \"$27.00\".\n\nI want to write a test that specifically fails on the old buggy code (a true regression test) and passes on the fixed version.\n\nIn the old code:\n- total(o) == 2400 (bug) → new code 2700. So `assert total(o) == 2700` fails on the old code. Good.\n- sum(line_totals) == subtotal: old code: line_total=2700, subtotal=2700 → equal (both wrong). So that particular check would pass even on the old code. Not a discriminator.\n- subtotal - sum(discounts) == total: old: 2700 - 300 = 2400 == total 2400 → equal. So this also passes on the old code (it's consistent within the buggy framework, but the receipt was inconsistent with the line items).\n\nThe real invariant that discriminates is: the line items must reflect the gross (qty × unit price). So assert line_total == 12*250 = 3000. In the old code line_total == 2700 → fails. Good discriminator.\n\nAlso, assert that the receipt displays the correct per-line amount. In the old code, the receipt showed \"12 x Notebook $27.00\". In the new code, \"12 x Notebook $30.00\". So assert \"$30.00\" appears for the line… but \"$30.00\" and the total… let me check: the new receipt has line $30.00, subtotal $30.00, discount -$3.00, total $27.00. So \"$30.00\" appears (line + subtotal). The old receipt had no \"$30.00\" at all (it showed $27.00, $27.00, -$3.00, $24.00). So asserting that the line contains the gross is a good discriminator.\n\nLet me write a focused, robust test. I'll compute expected values programmatically and add a receipt consistency check.\n\nI think the cleanest regression test is:\n\n```python\ndef test_bulk_discount_applied_once_and_receipt_adds_up():\n    notebook = Product(\"NB-A5\", \"Notebook\", 250)\n    o = Order(\"cust\")\n    o.add(notebook, 12)  # 12 >= BULK_MIN_QTY (10)\n\n    gross = 12 * 250                       # $30.00\n    bulk_off = percent_of(gross, 10)       # $3.00\n    expected = gross - bulk_off           # $27.00\n\n    # Line items and subtotal are the gross, not pre-discounted.\n    assert line_total(o.items[0]) == gross\n    assert subtotal(o) == gross\n\n    # Exactly one bulk discount.\n    found = [d for d in discounts(o) if d[0] == \"Bulk discount (Notebook)\"]\n    assert found == [(\"Bulk discount (Notebook)\", bulk_off)]\n\n    # Charged correctly: discount applied exactly once.\n    assert total(o) == expected\n\n    # Receipt adds up.\n    text = receipt(o)\n    assert \"Bulk discount (Notebook)\" in text   # discount line kept\n    assert f\"${expected/100:.2f}\" in text       # $27.00\n```\n\nWait, formatting: expected = 2700 cents → $27.00. `f\"${2700/100:.2f}\"` = \"$27.00\". Good. But to be safe, let me use the fmt function. Actually, the receipt uses `fmt`. Let me import fmt and compare properly. Or just hardcode \"$27.00\".\n\nLet me be careful about the imports in the test file. The existing test file imports:\n```python\nfrom shop.checkout import receipt, total\nfrom shop.discounts import InvalidCoupon\nfrom shop.models import Order, Product\n```\n\nI'll need to import `line_total, subtotal` from shop.pricing, `discounts` from shop.checkout, and `percent_of` from shop.money.\n\nLet me add a new test file, or add to the existing one. The task says \"add a regression test.\" I could either add a new test function to the existing test_basic.py or create a new file. To keep the regression test clearly identifiable and to not touch the existing test, I'll add it to test_basic.py — that's fine and conventional. Actually, a dedicated file like test_bulk_discount.py might be cleaner and more self-documenting. But adding to test_basic.py is simpler and fits \"the tests are run with python -m pytest.\"\n\nLet me create a new file `tests/test_bulk_discount.py` for clarity and focus. Actually, let me reconsider — a single new test function appended to test_basic.py would also be fine, but a separate file gives the regression test a clear home and avoids the risk of editing existing tests. Let me go with a separate file.\n\nLet me make the receipt consistency assertion more robust. I want to verify that the receipt actually adds up (subtotal - discounts = total, and lines sum to subtotal). Let me parse the receipt minimally, or just assert the key numbers.\n\nActually, a clean and robust approach for \"the receipt adds up\" is to assert the invariants via the API (line totals sum to subtotal; subtotal - discounts = total), plus assert that the receipt text contains the discount line and the correct total. This captures both the API-level correctness and the rendered receipt.\n\nBut I also want the test to genuinely guard against the rendered receipt being inconsistent. Let me write a helper to parse the receipt's monetary lines. Hmm, that might be overengineering. Let me do a focused, readable test that pins the key numbers, and include a receipt consistency check via a small parse.\n\nLet me reconsider what the most valuable regression assertions are:\n\n1. `total(o) == 2700` — pins \"discount applied once, correct charge.\" (fails on old code: 2400)\n2. `line_total(o.items[0]) == 3000` — pins \"line items are gross.\" (fails on old code: 2700)\n3. Receipt contains the discount line and correct total.\n\nI think I'll write it to also verify the receipt arithmetic by parsing. Let me write a small parser that extracts the \"Subtotal\", \"Total\", and discount lines, and asserts subtotal - sum(discounts) == total and lines sum == subtotal. This directly encodes \"the receipt adds up.\"\n\nLet me write a robust receipt parser. The receipt format is:\n```\nReceipt for cust\n  12 x Notebook                 $30.00\n  Subtotal                     $30.00\n  Bulk discount (Notebook)     -$3.00\n  Total                        $27.00\n```\n\nParsing:\n- Lines starting with \"  \" (indented) are item/discount/total lines.\n- The first line \"Receipt for ...\" is the header.\n- Item lines: `{qty} x {name} {amount}`.\n- \"Subtotal\" line, \"Total\" line.\n- Discount lines: labels other than item/subtotal/total, with a negative amount.\n\nParsing amounts from the right: each line ends with a right-aligned formatted amount. I can split and take the last token as the amount.\n\nLet me write:\n```python\ndef _parse_receipt(text):\n    lines = [ln for ln in text.splitlines() if ln.strip()]\n    # drop header\n    body = lines[1:]\n    items = []\n    subtotal = None\n    total = None\n    discounts = []\n    for ln in body:\n        label = ln.strip()\n        # amount is the last whitespace-separated token\n        parts = ln.split()\n        amount = int(float(parts[-1].replace(\"$\", \"\").replace(\"-\", \"\")) * 100)\n        sign = -1 if parts[-1].startswith(\"-\") else 1\n        amount *= sign\n        if label.startswith(\"Subtotal\"):\n            subtotal = amount\n        elif label.startswith(\"Total\"):\n            total = amount\n        elif \" x \" in label:\n            items.append((label, amount))\n        else:\n            discounts.append((label, amount))\n    return items, subtotal, total, discounts\n```\n\nHmm, parsing floating point from the string is a bit ugly. Let me parse the cents directly from the string: `f\"{sign}${cents//100}.{cents%100:02d}\"`. I can parse the amount by stripping \"$\", handling the sign, and splitting on \".\".\n\nLet me write a small helper `parse_cents(s)` that converts \"$30.00\" → 3000, \"-$3.00\" → -300.\n\n```python\ndef _cents(token):\n    neg = token.startswith(\"-\")\n    t = token.lstrip(\"-\")\n    assert t.startswith(\"$\")\n    t = t[1:]\n    whole, frac = t.split(\".\")\n    value = int(whole) * 100 + int(frac)\n    return -value if neg else value\n```\n\nThis is clean. Then in the test:\n```python\nitems, subtotal, total_amt, discounts = _parse_receipt(text)\nassert sum(a for _, a in items) == subtotal\nassert subtotal + sum(a for _, a in discounts) == total_amt\n```\nNote: discount amounts are negative, so subtotal + (negative discounts) = total. Let me verify: subtotal=3000, discounts=[(label, -300)], total=2700. 3000 + (-300) = 2700. ✓.\n\nAnd assert that the discount line is present: any label == \"Bulk discount (Notebook)\".\n\nThis is a solid, self-contained regression test that encodes \"the receipt adds up\" and \"the discount line is present.\" Combined with the API assertions (total == 2700, line_total == 3000), it's comprehensive.\n\nBut I'm worried about over-relying on parsing the exact receipt layout. If the receipt format changes, the test breaks. But this is a regression test for the current format, and that's acceptable. Still, to be safe, let me make the parser tolerant: identify \"Subtotal\"/\"Total\" by label prefix, items by \" x \", and everything else as a discount. This is fairly robust to reordering.\n\nActually, let me reconsider. I think a cleaner approach that's less fragile is: assert the API invariants (which encode the math) plus assert that the receipt text contains the expected discount label, the correct total, and the correct line amount. Then separately assert the receipt arithmetic via parsing as a bonus.\n\nHmm, I think including the parse-based \"receipt adds up\" check is genuinely valuable because the bug report specifically complains that \"the receipt doesn't add up.\" So encoding that the receipt adds up is exactly on-target. Let me include it, but keep it robust.\n\nLet me also double-check: are there any other products/scenarios where bulk discount + category promo interact? E.g., 12 books. In that case, both bulk (10%) and category (5%) apply. subtotal = gross, discounts = bulk + category. total = gross - bulk - category. That's fine, each applied once. The receipt adds up. Good. My change doesn't break that.\n\nLet me also verify: with my change, is there any scenario where `discounts`'s `after` (subtotal - found) could go negative and affect the coupon? E.g., a fixed coupon min(value, after). If after is negative… off = min(value, negative) = negative → a negative discount gets added, which could increase the total. But that's a pre-existing edge case and unrelated to this bug. Actually wait — could after go negative in the customer's scenario? subtotal=3000, found=300, after=2700. Positive. Fine.\n\nLet me also reconsider: `total()` uses `max(0, ...)`. Fine.\n\nNow let me also verify that the existing tests still pass. I'll run the whole suite after adding the test.\n\nLet me write the regression test file.\n\nOne more consideration: the task says \"keep the receipt's discount line.\" My fix keeps the `bulk` discount in discounts.py, so the line \"Bulk discount (Notebook)\" still appears. Good. My test asserts its presence.\n\nLet me write the test.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972749051,
+            "completed": 1793972830884
+          }
+        },
+        {
+          "type": "text",
+          "text": "The fix works — total is now `$27.00`, the line shows the gross `$30.00`, and the single bulk discount line is preserved. The receipt adds up: `12 × $2.50 = $30.00`, `− $3.00`, `= $27.00`.\n\nNow I'll add a regression test that pins the double-counting and asserts the receipt actually adds up."
+        },
+        {
+          "type": "tool",
+          "id": "k2NFV4hORnIhKahm3cSHj2FEowIVK1Zt",
+          "name": "write",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "tests/test_bulk_discount.py",
+              "content": "\"\"\"Regression: the bulk discount must be applied exactly once.\n\nCustomer report: 12 notebooks @ $2.50, receipt showed a $3.00 bulk line but\nthe total was short because the discount was baked into the line total *and*\nsubtracted again at the order level. The line/subtotal/total no longer matched.\n\"\"\"\nfrom shop.checkout import discounts, receipt, total\nfrom shop.models import Order, Product\nfrom shop.pricing import BULK_MIN_QTY, BULK_PERCENT, line_total, subtotal\n\nNOTEBOOK = Product(\"NB-A5\", \"Notebook\", 250)\n\n\ndef _cents(token: str) -> int:\n    \"\"\"Parse a receipt amount token like '$30.00' or '-$3.00' into signed cents.\"\"\"\n    neg = token.startswith(\"-\")\n    t = token.lstrip(\"-\").lstrip(\"$\")\n    whole, frac = t.split(\".\")\n    value = int(whole) * 100 + int(frac)\n    return -value if neg else value\n\n\ndef _parse_receipt(text: str):\n    \"\"\"Return (items, subtotal, total, discount_lines) from a rendered receipt.\"\"\"\n    items, discounts_out = [], []\n    subtotal = total = None\n    for ln in text.splitlines()[1:]:\n        if not ln.strip():\n            continue\n        label = ln.strip()\n        amount = _cents(ln.split()[-1])\n        if label.startswith(\"Subtotal\"):\n            subtotal = amount\n        elif label.startswith(\"Total\"):\n            total = amount\n        elif \" x \" in label:\n            items.append((label, amount))\n        else:\n            discounts_out.append((label, amount))\n    return items, subtotal, total, discounts_out\n\n\ndef test_bulk_discount_applied_once():\n    o = Order(\"cust\")\n    o.add(NOTEBOOK, 12)  # 12 >= BULK_MIN_QTY\n\n    gross = NOTEBOOK.price_cents * 12\n    bulk_off = (gross * BULK_PERCENT + 50) // 100  # 10%, half-up, like money.percent_of\n\n    # Line total and subtotal are the gross; the discount is not pre-baked in.\n    assert line_total(o.items[0]) == gross\n    assert subtotal(o) == gross\n\n    # Exactly one bulk discount, for the right amount.\n    assert discounts(o) == [(\"Bulk discount (Notebook)\", bulk_off)]\n\n    # Charged correctly: subtotal minus the single discount.\n    assert total(o) == gross - bulk_off\n\n\ndef test_receipt_adds_up_and_keeps_discount_line():\n    o = Order(\"cust\")\n    o.add(NOTEBOOK, 12)\n\n    gross = NOTEBOOK.price_cents * 12\n    bulk_off = (gross * BULK_PERCENT + 50) // 100\n\n    text = receipt(o)\n    items, subtotal_amt, total_amt, discount_lines = _parse_receipt(text)\n\n    # The bulk discount line is still on the receipt.\n    labels = [label for label, _ in discount_lines]\n    assert \"Bulk discount (Notebook)\" in labels\n\n    # Items sum to the subtotal, and subtotal minus discounts equals the total.\n    assert sum(amount for _, amount in items) == subtotal_amt\n    assert subtotal_amt == gross\n    assert total_amt == gross - bulk_off\n    assert subtotal_amt + sum(amount for _, amount in discount_lines) == total_amt\n"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Created file successfully: tests/test_bulk_discount.py"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972818815,
+            "ran": 1793972830886,
+            "completed": 1793972830889
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "ca1c8a585f2fcf80f62cdc02d2dbfd9c66dbd94c",
+        "end": "83cca13209f1db1c11bc931865e645da904514b2",
+        "files": [
+          "tests/test_bulk_discount.py"
+        ]
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 111,
+        "output": 4042,
+        "reasoning": 0,
+        "cache": {
+          "read": 15595,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11d02b7001PN3EkcD1C11JWm",
+      "time": {
+        "created": 1793972830905,
+        "streamed": 1793972835739,
+        "completed": 1793972835878
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Now then, let's run the full test suite.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972831266,
+            "completed": 1793972835736
+          }
+        },
+        {
+          "type": "text",
+          "text": "Now run the full test suite:"
+        },
+        {
+          "type": "tool",
+          "id": "aSMisIPugqzCiciE8zoUpyoxvtRQFhUc",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "cd /tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work && python -m pytest -v 2>&1 | tail -40"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "============================= test session starts ==============================\nplatform linux -- Python 3.14.8, pytest-9.1.1, pluggy-1.6.0 -- /nix/store/a2a10rs3clj8hf5k5hql21cqkb762g5f-agentic-env/bin/python\ncachedir: .pytest_cache\nrootdir: /tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work\ncollecting ... collected 8 items\n\ntests/test_basic.py::test_simple_total PASSED                            [ 12%]\ntests/test_basic.py::test_add_merges_lines PASSED                        [ 25%]\ntests/test_basic.py::test_books_promo PASSED                             [ 37%]\ntests/test_basic.py::test_fixed_coupon PASSED                            [ 50%]\ntests/test_basic.py::test_bad_coupon PASSED                              [ 62%]\ntests/test_basic.py::test_receipt_lists_items PASSED                     [ 75%]\ntests/test_bulk_discount.py::test_bulk_discount_applied_once PASSED      [ 87%]\ntests/test_bulk_discount.py::test_receipt_adds_up_and_keeps_discount_line FAILED [100%]\n\n=================================== FAILURES ===================================\n_________________ test_receipt_adds_up_and_keeps_discount_line _________________\n\n    def test_receipt_adds_up_and_keeps_discount_line():\n        o = Order(\"cust\")\n        o.add(NOTEBOOK, 12)\n    \n        gross = NOTEBOOK.price_cents * 12\n        bulk_off = (gross * BULK_PERCENT + 50) // 100\n    \n        text = receipt(o)\n        items, subtotal_amt, total_amt, discount_lines = _parse_receipt(text)\n    \n        # The bulk discount line is still on the receipt.\n        labels = [label for label, _ in discount_lines]\n>       assert \"Bulk discount (Notebook)\" in labels\nE       AssertionError: assert 'Bulk discount (Notebook)' in ['Bulk discount (Notebook)     -$3.00']\n\ntests/test_bulk_discount.py:73: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_bulk_discount.py::test_receipt_adds_up_and_keeps_discount_line\n========================= 1 failed, 7 passed in 0.02s ==========================\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793972831771,
+            "ran": 1793972835738,
+            "completed": 1793972835871
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "83cca13209f1db1c11bc931865e645da904514b2",
+        "end": "83cca13209f1db1c11bc931865e645da904514b2",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 25,
+        "output": 134,
+        "reasoning": 0,
+        "cache": {
+          "read": 19747,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11d162a00118dYN5wluw5TGl",
+      "time": {
+        "created": 1793972835884,
+        "streamed": 1793972843117,
+        "completed": 1793972843137
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "My parser is retaining the entire line including the amount as the label. I need to strip off the trailing amount token from the label. Let me fix `_parse_receipt` so that the label excludes the trailing amount token.\n\nThe label should be everything before the last whitespace-separated token. Let me fix it like this: `label = \" \".join(ln.split()[:-1])` — no wait, the label might contain spaces like \"Bulk discount (Notebook)\". The amount is the last token. So label = everything except the last token. But joining with a single space collapses the original alignment — that's fine for matching purposes.\n\nLet me fix it:\n```python\nparts = ln.split()\namount = _cents(parts[-1])\nlabel = \" \".join(parts[:-1])\n```\n\nLet me update it.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972838025,
+            "completed": 1793972843115
+          }
+        },
+        {
+          "type": "text",
+          "text": "My parser kept the amount token in the label. Let me fix it to strip the trailing amount."
+        },
+        {
+          "type": "tool",
+          "id": "cTGj0ps8ZDvNyfRTW8gG7lV6HyS2QcaW",
+          "name": "edit",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "tests/test_bulk_discount.py",
+              "oldString": "        label = ln.strip()\n        amount = _cents(ln.split()[-1])",
+              "newString": "        parts = ln.split()\n        amount = _cents(parts[-1])\n        label = \" \".join(parts[:-1])"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Edited tests/test_bulk_discount.py (1 replacement)"
+              }
+            ],
+            "metadata": {
+              "files": [
+                {
+                  "file": "tests/test_bulk_discount.py",
+                  "patch": "Index: tests/test_bulk_discount.py\n===================================================================\n--- tests/test_bulk_discount.py\n+++ tests/test_bulk_discount.py\n@@ -26,10 +26,11 @@\n     subtotal = total = None\n     for ln in text.splitlines()[1:]:\n         if not ln.strip():\n             continue\n-        label = ln.strip()\n-        amount = _cents(ln.split()[-1])\n+        parts = ln.split()\n+        amount = _cents(parts[-1])\n+        label = \" \".join(parts[:-1])\n         if label.startswith(\"Subtotal\"):\n             subtotal = amount\n         elif label.startswith(\"Total\"):\n             total = amount\n",
+                  "status": "modified",
+                  "additions": 3,
+                  "deletions": 2
+                }
+              ],
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1793972842162,
+            "ran": 1793972843116,
+            "completed": 1793972843128
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "83cca13209f1db1c11bc931865e645da904514b2",
+        "end": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "files": [
+          "tests/test_bulk_discount.py"
+        ]
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 578,
+        "output": 291,
+        "reasoning": 0,
+        "cache": {
+          "read": 19905,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11d32850014dIs4RuSVBjTcm",
+      "time": {
+        "created": 1793972843143,
+        "streamed": 1793972845979,
+        "completed": 1793972845985
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Now, the `ln.strip()` line has been replaced. Let's check whether the current state of the file is consistent — previously it was `label = ln.strip()`, and I replaced that with `parts = ln.split()` etc. Let me read it to confirm.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972843507,
+            "completed": 1793972845977
+          }
+        },
+        {
+          "type": "tool",
+          "id": "Vbxvk8UatbTQeQCnpFVnqF6aNNdSz6vb",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "tests/test_bulk_discount.py",
+              "offset": 20,
+              "limit": 20
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file tests/test_bulk_discount.py, lines 20-39\n20:     return -value if neg else value\n21: \n22: \n23: def _parse_receipt(text: str):\n24:     \"\"\"Return (items, subtotal, total, discount_lines) from a rendered receipt.\"\"\"\n25:     items, discounts_out = [], []\n26:     subtotal = total = None\n27:     for ln in text.splitlines()[1:]:\n28:         if not ln.strip():\n29:             continue\n30:         parts = ln.split()\n31:         amount = _cents(parts[-1])\n32:         label = \" \".join(parts[:-1])\n33:         if label.startswith(\"Subtotal\"):\n34:             subtotal = amount\n35:         elif label.startswith(\"Total\"):\n36:             total = amount\n37:         elif \" x \" in label:\n38:             items.append((label, amount))\n39:         else:\n[Output truncated. Continue reading with offset: 40]"
+              }
+            ],
+            "metadata": {
+              "truncated": true
+            }
+          },
+          "time": {
+            "created": 1793972845393,
+            "ran": 1793972845978,
+            "completed": 1793972845982
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "end": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 26,
+        "output": 112,
+        "reasoning": 0,
+        "cache": {
+          "read": 20773,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11d3da5001Kb5Ksaz2dqE3N4",
+      "time": {
+        "created": 1793972845991,
+        "streamed": 1793972848782,
+        "completed": 1793972848909
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Alright, the parser has been fixed. Let's re-run the tests.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972847034,
+            "completed": 1793972848780
+          }
+        },
+        {
+          "type": "tool",
+          "id": "ugxIfPidkQS4zoGY2vauPsBKMwzxkCxZ",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "cd /tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work && python -m pytest -v 2>&1 | tail -20"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "============================= test session starts ==============================\nplatform linux -- Python 3.14.8, pytest-9.1.1, pluggy-1.6.0 -- /nix/store/a2a10rs3clj8hf5k5hql21cqkb762g5f-agentic-env/bin/python\ncachedir: .pytest_cache\nrootdir: /tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work\ncollecting ... collected 8 items\n\ntests/test_basic.py::test_simple_total PASSED                            [ 12%]\ntests/test_basic.py::test_add_merges_lines PASSED                        [ 25%]\ntests/test_basic.py::test_books_promo PASSED                             [ 37%]\ntests/test_basic.py::test_fixed_coupon PASSED                            [ 50%]\ntests/test_basic.py::test_bad_coupon PASSED                              [ 62%]\ntests/test_basic.py::test_receipt_lists_items PASSED                     [ 75%]\ntests/test_bulk_discount.py::test_bulk_discount_applied_once PASSED      [ 87%]\ntests/test_bulk_discount.py::test_receipt_adds_up_and_keeps_discount_line PASSED [100%]\n\n============================== 8 passed in 0.01s ===============================\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793972847468,
+            "ran": 1793972848781,
+            "completed": 1793972848906
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "end": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 259,
+        "output": 130,
+        "reasoning": 0,
+        "cache": {
+          "read": 20910,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11d4911001ed9HYXvgXGnpuA",
+      "time": {
+        "created": 1793972848915,
+        "streamed": 1793972858449,
+        "completed": 1793972858705
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "All 8 tests passed. Next, let's verify that the regression test actually detects the original bug — that is, confirm that the regression test fails against the buggy code. Temporarily revert the fix, run the new test to confirm it fails, and then reapply the fix. This will prove that the regression test is genuine.\n\nLet's try doing this with git stash, or by manually reverting. Actually, we can check with `git diff`, temporarily revert the changes in pricing.py, run the test, and then restore.\n\nLet's proceed carefully. We'll temporarily restore the buggy line_total, run only the new test to confirm it fails, and then revert back.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972850393,
+            "completed": 1793972858438
+          }
+        },
+        {
+          "type": "text",
+          "text": "All 8 tests pass. Let me verify the regression test is genuinely protective — it should **fail** against the original buggy code. I'll temporarily restore the bug, run the new test, then re-apply the fix."
+        },
+        {
+          "type": "tool",
+          "id": "iWe5iEg7QKZMeF5CZL4Zk5NIvVLHscoR",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "cd /tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work && cp shop/pricing.py /tmp/pricing_fixed.py && cat > shop/pricing.py <<'EOF'\nfrom .models import LineItem, Order\nfrom .money import percent_of\n\nBULK_MIN_QTY = 10\nBULK_PERCENT = 10\n\n\ndef line_total(item: LineItem) -> int:\n    \"\"\"Price of one line before order-level discounts.\"\"\"\n    total = item.product.price_cents * item.qty\n    if item.qty >= BULK_MIN_QTY:\n        total -= percent_of(total, BULK_PERCENT)\n    return total\n\n\ndef subtotal(order: Order) -> int:\n    return sum(line_total(item) for item in order.items)\nEOF\necho \"=== Running new tests against BUGGY code (expect FAIL) ===\"\npython -m pytest tests/test_bulk_discount.py -v 2>&1 | tail -15\necho \"=== Restoring fix ===\"\ncp /tmp/pricing_fixed.py shop/pricing.py\npython -m pytest -q 2>&1 | tail -5"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "=== Running new tests against BUGGY code (expect FAIL) ===\n    \n        # The bulk discount line is still on the receipt.\n        labels = [label for label, _ in discount_lines]\n        assert \"Bulk discount (Notebook)\" in labels\n    \n        # Items sum to the subtotal, and subtotal minus discounts equals the total.\n        assert sum(amount for _, amount in items) == subtotal_amt\n>       assert subtotal_amt == gross\nE       assert 2700 == 3000\n\ntests/test_bulk_discount.py:78: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_bulk_discount.py::test_bulk_discount_applied_once - Asserti...\nFAILED tests/test_bulk_discount.py::test_receipt_adds_up_and_keeps_discount_line\n============================== 2 failed in 0.02s ===============================\n=== Restoring fix ===\n........                                                                 [100%]\n8 passed in 0.01s\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793972854408,
+            "ran": 1793972858439,
+            "completed": 1793972858698
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "end": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 351,
+        "output": 506,
+        "reasoning": 0,
+        "cache": {
+          "read": 21298,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11d6f54001wtrzP9UGX1Qu5S",
+      "time": {
+        "created": 1793972858710,
+        "streamed": 1793972863638,
+        "completed": 1793972863646
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "The regression test fails with the buggy code (as expected), and passes with the fixed version. The fix has been restored, and all 8 tests pass.\n\nLet's do a final review of the changes with `git diff` and present a summary. Also, let's confirm that the final state of pricing.py is the fixed version.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972859757,
+            "completed": 1793972863635
+          }
+        },
+        {
+          "type": "text",
+          "text": "The regression test correctly **fails** against the buggy code (catches the double-discount) and passes with the fix. Let me show the final diff."
+        },
+        {
+          "type": "tool",
+          "id": "QSEa4I3VWwyeXSD6qnQOWwgrkFog21fN",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "cd /tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/pilot/py-orders-bug-r1/work && git --no-pager diff -- shop/pricing.py && echo \"--- untracked ---\" && git status --short"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "diff --git a/shop/pricing.py b/shop/pricing.py\nindex a57a1ec..0bc003e 100644\n--- a/shop/pricing.py\n+++ b/shop/pricing.py\n@@ -1,5 +1,4 @@\n from .models import LineItem, Order\n-from .money import percent_of\n \n BULK_MIN_QTY = 10\n BULK_PERCENT = 10\n@@ -7,10 +6,7 @@ BULK_PERCENT = 10\n \n def line_total(item: LineItem) -> int:\n     \"\"\"Price of one line before order-level discounts.\"\"\"\n-    total = item.product.price_cents * item.qty\n-    if item.qty >= BULK_MIN_QTY:\n-        total -= percent_of(total, BULK_PERCENT)\n-    return total\n+    return item.product.price_cents * item.qty\n \n \n def subtotal(order: Order) -> int:\n--- untracked ---\n M shop/pricing.py\n?? tests/test_bulk_discount.py\n"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793972862020,
+            "ran": 1793972863636,
+            "completed": 1793972863643
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "end": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 219,
+        "output": 225,
+        "reasoning": 0,
+        "cache": {
+          "read": 22154,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11d82a2001fNceyhl2XUkCN5",
+      "time": {
+        "created": 1793972863651,
+        "streamed": 1793972867863,
+        "completed": 1793972867870
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "The changes are clean and minimal. Let's clean up the temporary reproduction file I created earlier (it's in /tmp, so it's not really a problem, but I'll delete it just in case). Actually, /tmp/repro.py is in the system temp area and outside the working directory, so it's fine to leave it, but I'll delete it for tidiness. It's really trivial, so I'll just delete it.\n\nLet's do the final cleanup and present the summary.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972864726,
+            "completed": 1793972867861
+          }
+        },
+        {
+          "type": "tool",
+          "id": "zXZJcWrlA7h5YYjtaweFQsu9o2NYRYtT",
+          "name": "shell",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "rm -f /tmp/repro.py /tmp/pricing_fixed.py"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "(no output)"
+              }
+            ],
+            "metadata": {
+              "status": "completed",
+              "truncated": false,
+              "exit": 0
+            }
+          },
+          "time": {
+            "created": 1793972867571,
+            "ran": 1793972867862,
+            "completed": 1793972867867
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "end": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 238,
+        "output": 144,
+        "reasoning": 0,
+        "cache": {
+          "read": 22597,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11d9321001EK59qg405zMIyX",
+      "time": {
+        "created": 1793972867875,
+        "streamed": 1793972875989,
+        "completed": 1793972875993
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "qwen3.8-27b-w4a4",
+        "providerID": "llamacpp",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Complete. I'll write the summary.",
+          "native": {
+            "reasoningField": "reasoning_content"
+          },
+          "time": {
+            "created": 1793972868136,
+            "completed": 1793972875988
+          }
+        },
+        {
+          "type": "text",
+          "text": "Done. Here's the summary.\n\n## Root cause\n\nThe 10% bulk discount was applied **twice**:\n\n1. **`line_total`** in `shop/pricing.py` subtracted the bulk discount from each line (so the line showed `$27.00` instead of the gross `$30.00`).\n2. **`discounts.bulk`** in `shop/discounts.py` (applied via `checkout`) subtracted the same `$3.00` again as an order-level line.\n\nSo the subtotal was already discounted, and the receipt then subtracted the discount a second time → the total was too low and the line/subtotal/discount/total didn't reconcile. This contradicted `line_total`'s own docstring (*\"before order-level discounts\"*).\n\n## Fix\n\n`shop/pricing.py` — `line_total` now returns the gross price only (`price_cents * qty`), removing the pre-baked bulk subtraction (and the now-unused `percent_of` import). The bulk discount is applied exactly once, at the order level in `discounts.bulk`.\n\nCustomer's order now reconciles:\n```\n  12 x Notebook                 $30.00   (12 × $2.50)\n  Subtotal                     $30.00\n  Bulk discount (Notebook)     -$3.00\n  Total                        $27.00\n```\nThe discount line is kept, and the customer is charged `$27.00` as expected.\n\n## Regression test\n\n`tests/test_bulk_discount.py` — two tests:\n- `test_bulk_discount_applied_once`: asserts line total/subtotal are the gross, exactly one bulk discount of the right size, and the correct final total.\n- `test_receipt_adds_up_and_keeps_discount_line`: parses the rendered receipt and asserts the discount line is present, items sum to the subtotal, and subtotal minus discounts equals the total.\n\nI verified the new tests **fail** against the original buggy code and **pass** with the fix. Full suite: **8 passed** via `python -m pytest`."
+        }
+      ],
+      "snapshot": {
+        "start": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "end": "844ab7007b19463f987d0efa9ce617c1f8a0ae27",
+        "files": []
+      },
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 19,
+        "output": 468,
+        "reasoning": 0,
+        "cache": {
+          "read": 22978,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1b11db2da001qlVNWN3FA7yIqR",
+      "time": {
+        "created": 1793972875994
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}

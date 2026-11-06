@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Builds our llama.cpp fork into build-llama/: upstream llama.cpp at a pinned commit plus
-# patches/llama.cpp-ruquant.patch (the W4A4 / W4A4H ggml types with CPU and CUDA kernels, and the
-# hook that runs src/kernels.rs's CUDA kernels inside ggml's graph). Gives the libraries the Rust
-# crate links and the llama.cpp tools, which all run W4A4 GGUFs: llama-perplexity, llama-bench,
-# llama-completion, test-backend-ops.
+# patches/llama.cpp-ruquant.patch (the W4A4 / W4A4H ggml types with CPU and CUDA kernels, the q4_0
+# KV attention, and the hook that runs src/kernels.rs's CUDA kernels inside ggml's graph). Gives the
+# libraries the Rust crate links and the llama.cpp tools, which all run W4A4 GGUFs: llama-perplexity,
+# llama-bench, llama-completion, test-backend-ops (and llama-server with SERVER=1). On NVIDIA GPUs
+# with INT4 tensor cores (Turing, Ampere, Ada) the W4A4 matmuls and the q4_0 attention's Q.K run on
+# them; CUDA_ARCH="75;80;86;89" builds for all of those.
 #   ./build-llama.sh                 CUDA if nvcc is found, else HIP if hipcc is, else CPU only
 #   BACKEND=cpu|cuda|hip ./build-llama.sh      ARCH=gfx906 (HIP) / CUDA_ARCH=86 (CUDA) to override
 #   VULKAN=1 ./build-llama.sh        also build ggml-vulkan
+#   SERVER=1 ./build-llama.sh        also build llama-server (accuracy/agentic/serve.sh)
 #   ./build-llama.sh --export        after editing build-llama/src: write its diff back to the patch
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -47,6 +50,9 @@ case $backend in
     cpu)  ;;
     *) echo "BACKEND must be cpu, cuda or hip" >&2; exit 1 ;;
 esac
+if [ "${SERVER:-0}" = 1 ]; then
+    args+=(-DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_MTMD=ON); targets+=(llama-server)
+fi
 if [ "${VULKAN:-0}" = 1 ]; then # optional extra backend for src/bench.rs
     args+=(-DGGML_VULKAN=ON); targets+=(ggml-vulkan)
 fi

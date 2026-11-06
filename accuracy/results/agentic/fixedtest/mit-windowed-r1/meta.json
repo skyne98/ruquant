@@ -1,0 +1,32 @@
+{
+ "label": "fixedtest",
+ "task": "mit-windowed",
+ "rep": 1,
+ "model": "llamacpp/qwen3.8-27b-w4a4",
+ "turns": [
+  {
+   "turn": 1,
+   "status": "exit 1",
+   "seconds": 381.8
+  }
+ ],
+ "started": 1793983835.216883,
+ "session": "ses_e4e3b1295ffedrsuEBaV8XQoRm",
+ "seconds": 381.8,
+ "hidden": {
+  "passed": 718,
+  "failed": 9,
+  "errors": 0,
+  "rc": 1,
+  "ok": false,
+  "seconds": 7.7
+ },
+ "suite": {
+  "passed": 720,
+  "failed": 8,
+  "errors": 0,
+  "rc": 1,
+  "ok": false,
+  "seconds": 7.6
+ }
+}

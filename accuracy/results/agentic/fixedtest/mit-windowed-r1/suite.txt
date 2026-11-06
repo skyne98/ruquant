@@ -1,0 +1,242 @@
+$ python -m pytest -q -p no:cacheprovider tests
+............................................................................................................................................................................................... [ 26%]
+............................................................. [ 34%]
+............................................................. [ 43%]
+............FFFF............................................................... [ 54%]
+............................................................... [ 62%]
+...................... [ 65%]
+.................................................................. [ 75%]
+.............................................. [ 81%]
+............................................ [ 87%]
+...........................................................................................                        [100%]
+=================================== FAILURES ===================================
+________________________ WindowedTests.test_basic (n=5) ________________________
+
+self = <tests.test_more.WindowedTests testMethod=test_basic>
+
+    def test_basic(self):
+        iterable = [1, 2, 3, 4, 5]
+    
+        for n, expected in (
+            (6, [(1, 2, 3, 4, 5, None)]),
+            (5, [(1, 2, 3, 4, 5)]),
+            (4, [(1, 2, 3, 4), (2, 3, 4, 5)]),
+            (3, [(1, 2, 3), (2, 3, 4), (3, 4, 5)]),
+            (2, [(1, 2), (2, 3), (3, 4), (4, 5)]),
+            (1, [(1,), (2,), (3,), (4,), (5,)]),
+        ):
+            with self.subTest(n=n):
+                actual = list(mi.windowed(iterable, n))
+>               self.assertEqual(actual, expected)
+E               AssertionError: Lists differ: [(1, 2, 3, 4, 5), (2, 3, 4, 5, None), (3, 4, 5, None, Non[53 chars]one)] != [(1, 2, 3, 4, 5)]
+E               
+E               First list contains 4 additional elements.
+E               First extra element 1:
+E               (2, 3, 4, 5, None)
+E               
+E               - [(1, 2, 3, 4, 5),
+E               ?                 ^
+E               
+E               + [(1, 2, 3, 4, 5)]
+E               ?                 ^
+E               
+E               -  (2, 3, 4, 5, None),
+E               -  (3, 4, 5, None, None),
+E               -  (4, 5, None, None, None),
+E               -  (5, None, None, None, None)]
+
+tests/test_more.py:844: AssertionError
+________________________ WindowedTests.test_basic (n=4) ________________________
+
+self = <tests.test_more.WindowedTests testMethod=test_basic>
+
+    def test_basic(self):
+        iterable = [1, 2, 3, 4, 5]
+    
+        for n, expected in (
+            (6, [(1, 2, 3, 4, 5, None)]),
+            (5, [(1, 2, 3, 4, 5)]),
+            (4, [(1, 2, 3, 4), (2, 3, 4, 5)]),
+            (3, [(1, 2, 3), (2, 3, 4), (3, 4, 5)]),
+            (2, [(1, 2), (2, 3), (3, 4), (4, 5)]),
+            (1, [(1,), (2,), (3,), (4,), (5,)]),
+        ):
+            with self.subTest(n=n):
+                actual = list(mi.windowed(iterable, n))
+>               self.assertEqual(actual, expected)
+E               AssertionError: Lists differ: [(1, [17 chars]4, 5), (3, 4, 5, None), (4, 5, None, None), (5[15 chars]one)] != [(1, [17 chars]4, 5)]
+E               
+E               First list contains 3 additional elements.
+E               First extra element 2:
+E               (3, 4, 5, None)
+E               
+E               + [(1, 2, 3, 4), (2, 3, 4, 5)]
+E               - [(1, 2, 3, 4),
+E               -  (2, 3, 4, 5),
+E               -  (3, 4, 5, None),
+E               -  (4, 5, None, None),
+E               -  (5, None, None, None)]
+
+tests/test_more.py:844: AssertionError
+________________________ WindowedTests.test_basic (n=3) ________________________
+
+self = <tests.test_more.WindowedTests testMethod=test_basic>
+
+    def test_basic(self):
+        iterable = [1, 2, 3, 4, 5]
+    
+        for n, expected in (
+            (6, [(1, 2, 3, 4, 5, None)]),
+            (5, [(1, 2, 3, 4, 5)]),
+            (4, [(1, 2, 3, 4), (2, 3, 4, 5)]),
+            (3, [(1, 2, 3), (2, 3, 4), (3, 4, 5)]),
+            (2, [(1, 2), (2, 3), (3, 4), (4, 5)]),
+            (1, [(1,), (2,), (3,), (4,), (5,)]),
+        ):
+            with self.subTest(n=n):
+                actual = list(mi.windowed(iterable, n))
+>               self.assertEqual(actual, expected)
+E               AssertionError: Lists differ: [(1, 2, 3), (2, 3, 4), (3, 4, 5), (4, 5, None), (5, None, None)] != [(1, 2, 3), (2, 3, 4), (3, 4, 5)]
+E               
+E               First list contains 2 additional elements.
+E               First extra element 3:
+E               (4, 5, None)
+E               
+E               - [(1, 2, 3), (2, 3, 4), (3, 4, 5), (4, 5, None), (5, None, None)]
+E               + [(1, 2, 3), (2, 3, 4), (3, 4, 5)]
+
+tests/test_more.py:844: AssertionError
+________________________ WindowedTests.test_basic (n=2) ________________________
+
+self = <tests.test_more.WindowedTests testMethod=test_basic>
+
+    def test_basic(self):
+        iterable = [1, 2, 3, 4, 5]
+    
+        for n, expected in (
+            (6, [(1, 2, 3, 4, 5, None)]),
+            (5, [(1, 2, 3, 4, 5)]),
+            (4, [(1, 2, 3, 4), (2, 3, 4, 5)]),
+            (3, [(1, 2, 3), (2, 3, 4), (3, 4, 5)]),
+            (2, [(1, 2), (2, 3), (3, 4), (4, 5)]),
+            (1, [(1,), (2,), (3,), (4,), (5,)]),
+        ):
+            with self.subTest(n=n):
+                actual = list(mi.windowed(iterable, n))
+>               self.assertEqual(actual, expected)
+E               AssertionError: Lists differ: [(1, 2), (2, 3), (3, 4), (4, 5), (5, None)] != [(1, 2), (2, 3), (3, 4), (4, 5)]
+E               
+E               First list contains 1 additional elements.
+E               First extra element 4:
+E               (5, None)
+E               
+E               - [(1, 2), (2, 3), (3, 4), (4, 5), (5, None)]
+E               ?                                -----------
+E               
+E               + [(1, 2), (2, 3), (3, 4), (4, 5)]
+
+tests/test_more.py:844: AssertionError
+________________________ ReplaceTests.test_window_size _________________________
+
+self = <tests.test_more.ReplaceTests testMethod=test_window_size>
+
+    def test_window_size(self):
+        iterable = range(10)
+        pred = lambda *args: args == (0, 1, 2)
+        substitutes = []
+        actual = list(mi.replace(iterable, pred, substitutes, window_size=3))
+        expected = [3, 4, 5, 6, 7, 8, 9]
+>       self.assertEqual(actual, expected)
+E       AssertionError: Lists differ: [3, 4, 5, 6, 7, 8, 9, None, None] != [3, 4, 5, 6, 7, 8, 9]
+E       
+E       First list contains 2 additional elements.
+E       First extra element 7:
+E       None
+E       
+E       - [3, 4, 5, 6, 7, 8, 9, None, None]
+E       ?                     ------------
+E       
+E       + [3, 4, 5, 6, 7, 8, 9]
+
+tests/test_more.py:4006: AssertionError
+_____________________ ReplaceTests.test_window_size_count ______________________
+
+self = <tests.test_more.ReplaceTests testMethod=test_window_size_count>
+
+    def test_window_size_count(self):
+        iterable = range(10)
+        pred = lambda *args: (args == (0, 1, 2)) or (args == (7, 8, 9))
+        substitutes = []
+        actual = list(
+            mi.replace(iterable, pred, substitutes, count=1, window_size=3)
+        )
+        expected = [3, 4, 5, 6, 7, 8, 9]
+>       self.assertEqual(actual, expected)
+E       AssertionError: Lists differ: [3, 4, 5, 6, 7, 8, 9, None, None] != [3, 4, 5, 6, 7, 8, 9]
+E       
+E       First list contains 2 additional elements.
+E       First extra element 7:
+E       None
+E       
+E       - [3, 4, 5, 6, 7, 8, 9, None, None]
+E       ?                     ------------
+E       
+E       + [3, 4, 5, 6, 7, 8, 9]
+
+tests/test_more.py:4024: AssertionError
+______________________ ReplaceTests.test_window_size_end _______________________
+
+self = <tests.test_more.ReplaceTests testMethod=test_window_size_end>
+
+    def test_window_size_end(self):
+        iterable = range(10)
+        pred = lambda *args: args == (7, 8, 9)
+        substitutes = []
+        actual = list(mi.replace(iterable, pred, substitutes, window_size=3))
+        expected = [0, 1, 2, 3, 4, 5, 6]
+>       self.assertEqual(actual, expected)
+E       AssertionError: Lists differ: [0, 1, 2, 3, 4, 5, 6, None, None] != [0, 1, 2, 3, 4, 5, 6]
+E       
+E       First list contains 2 additional elements.
+E       First extra element 7:
+E       None
+E       
+E       - [0, 1, 2, 3, 4, 5, 6, None, None]
+E       ?                     ------------
+E       
+E       + [0, 1, 2, 3, 4, 5, 6]
+
+tests/test_more.py:4014: AssertionError
+_____________________ ReplaceTests.test_window_size_large ______________________
+
+self = <tests.test_more.ReplaceTests testMethod=test_window_size_large>
+
+    def test_window_size_large(self):
+        iterable = range(4)
+        pred = lambda *args: True
+        substitutes = [5, 6, 7]
+        actual = list(mi.replace(iterable, pred, substitutes, window_size=5))
+        expected = [5, 6, 7]
+>       self.assertEqual(actual, expected)
+E       AssertionError: Lists differ: [5, 6, 7, 5, 6, 7] != [5, 6, 7]
+E       
+E       First list contains 3 additional elements.
+E       First extra element 3:
+E       5
+E       
+E       - [5, 6, 7, 5, 6, 7]
+E       + [5, 6, 7]
+
+tests/test_more.py:4032: AssertionError
+=========================== short test summary info ============================
+SUBFAILED(n=5) tests/test_more.py::WindowedTests::test_basic - AssertionError...
+SUBFAILED(n=4) tests/test_more.py::WindowedTests::test_basic - AssertionError...
+SUBFAILED(n=3) tests/test_more.py::WindowedTests::test_basic - AssertionError...
+SUBFAILED(n=2) tests/test_more.py::WindowedTests::test_basic - AssertionError...
+FAILED tests/test_more.py::ReplaceTests::test_window_size - AssertionError: L...
+FAILED tests/test_more.py::ReplaceTests::test_window_size_count - AssertionEr...
+FAILED tests/test_more.py::ReplaceTests::test_window_size_end - AssertionErro...
+FAILED tests/test_more.py::ReplaceTests::test_window_size_large - AssertionEr...
+8 failed, 720 passed, 19985 subtests passed in 7.40s
+
+[exit 1]

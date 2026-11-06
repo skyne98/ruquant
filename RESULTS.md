@@ -167,8 +167,13 @@ export GGML_META_SPIN=2000000         # TP lane threads spin instead of sleeping
 - `-devd ROCm0` pins the drafter to one GPU. Replicating it on all four (mx's default) is 19% slower; splitting it
   is 24% slower.
 - Draft length 7, the most DFlash2's block of 8 allows, is the best: 5 and 6 are 6% and 4% slower at TP4.
-- `-bs --samplers temperature` is greedy with backend sampling. Under `-sm tensor` our argmax fast path does the
-  greedy pick on the CPU.
+- `-bs --samplers temperature` is greedy with backend sampling, for requests with temperature 0 (the benchmarks). Under
+  `-sm tensor` our argmax fast path does the greedy pick on the CPU. Agent clients send a temperature, and then this
+  samples the whole distribution, without top-k or top-p: drop both flags for agent use (backend sampling is off
+  under `-sm tensor` and with tool grammars anyway).
+- Images: add `--mmproj mmproj-Qwen3.8-27B-W4A4-F16.gguf`, our projector. The original model's projector (unsloth's,
+  ISTA's) does not work with this model: its residual stream is rotated, and the original projector's image
+  embeddings are noise to it (REPORT, "a vision projector for the rotated model").
 - Long prompts: add `-b 2048 -ub 2048 --ctx-checkpoints 0`. TP4 server prompt speed goes 845 -> 1066 t/s; the
   checkpoints cost 12-14% but are what lets the server reuse a cached prefix.
 - Patch defaults that are on without flags, each with an off switch:
@@ -221,6 +226,29 @@ q4_0 nibbles straight into `v_dot8` for Q·K and f16 dot2 for P·V, for decode a
 This is fork commit e509cee on the ruquant branch, and in `patches/`. Details: REPORT-2026-11-02.md, "64k context",
 "quantized KV cache on our model", "our q4 KV attention with v_dot8" and "the 4-bit KV cache against the reference at
 32k".
+
+## NVIDIA GPUs with INT4 tensor cores (3090, 2026-11-06)
+
+For testing on NVIDIA hardware, the CUDA build (`patches/llama.cpp-ruquant.patch`) runs the W4A4 matmuls and the q4_0
+cache's Q·K on the INT4 tensor cores (Turing, Ampere, Ada):
+- The matmuls stay bit-exact with the CPU and with the MI50 kernels. One activation group of 64 is one
+  `mma.m16n8k64.s4`, and the integer fold around it is unchanged.
+- On the 3090 the 27B's prefill goes from 329 to 1493 t/s, and DFlash2 decode from 81 to 137 t/s.
+- The q4_0 attention uses the MI50 kernel's numerics on `mma` and is faster than an f16 cache at 64k. At 32k it costs
+  +0.0019 KLD against UD-Q8_K_XL, measured with the kernel itself.
+
+Details: REPORT-2026-11-02.md, "INT4 tensor cores on NVIDIA".
+
+## Vision and long agent sessions (2026-11-06)
+
+- **Vision:** `models/vision/mmproj-Qwen3.8-27B-W4A4-F16.gguf` is Qwen3.8-27B's vision tower with its projector rotated
+  into our model's residual basis (`accuracy/rotate_mmproj.py`). It reads charts, signs and screenshots correctly on
+  the 3090 and on the MI50s, with DFlash2 and the q4_0 cache. The original projector gets 0 of 4 images right.
+- **The server's cache after long answers:** a client that returns the same text can still break the token match.
+  The model samples a valid but non-canonical tokenization, the server re-tokenizes the text, and the model's DeltaNet
+  state can't be rewound, so it re-processed the whole answer (up to 16k tokens). The fork's server now matches such
+  text against its cache (6698 -> 8 tokens re-processed). It also checkpoints every 4096 generated tokens, at 0.75% or
+  less of decode speed.
 
 ## Methodology
 

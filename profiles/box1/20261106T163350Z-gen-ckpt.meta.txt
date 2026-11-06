@@ -1,0 +1,8 @@
+label: gen-ckpt
+time: 2026-11-06T16:33:50Z
+binary: /home/gpu/mx-llama.cpp/build-ckpt/bin (libggml-hip.so md5 e0c11dd640a3f2a549a0d4c2f2c5f4a5, llama-server md5 8acae44c19feec15291a974f7a53c7de)
+model: /home/gpu/models/qwen3.8-27b-ost44-v2-wg64-rb4-gptq.gguf
+drafter: /home/gpu/models/dflash2-ost44-h4-l4-c8-g64-rb4.gguf
+mmproj: /home/gpu/models/vision/mmproj-Qwen3.8-27B-W4A4-F16.gguf
+gpu sets: 0,1 0,1,2,3; steps: 0 2048
+exit: 0

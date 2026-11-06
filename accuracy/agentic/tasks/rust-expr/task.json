@@ -1,0 +1,1 @@
+{"hidden": "cargo test --offline --test hidden_calc", "suite": "cargo test --offline"}

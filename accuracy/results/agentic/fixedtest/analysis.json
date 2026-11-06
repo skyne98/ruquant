@@ -1,0 +1,213 @@
+[
+ {
+  "run": "md-session-r1",
+  "task": "md-session",
+  "hidden": {
+   "passed": 21,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "suite": {
+   "passed": 102,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "turn_status": [
+   "ok",
+   "ok",
+   "ok",
+   "ok"
+  ],
+  "seconds": 1698.2,
+  "stage_hidden": [
+   {
+    "passed": 6,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   },
+   {
+    "passed": 11,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   },
+   {
+    "passed": 16,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   },
+   {
+    "passed": 21,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.2
+   }
+  ],
+  "tokens": {
+   "input": 47132,
+   "output": 146750,
+   "reasoning": 0,
+   "cache": {
+    "read": 1315322,
+    "write": 0
+   }
+  },
+  "steps": 44,
+  "tools": {
+   "read": 10,
+   "shell": 10,
+   "write": 3,
+   "edit": 19,
+   "grep": 1
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 4,
+  "flags": [],
+  "reasoning_chars": 397874,
+  "text_chars": 10364,
+  "server": {
+   "requests": 47,
+   "max_ctx": 64261,
+   "acceptance": 0.375,
+   "prompt_tokens": 47132,
+   "prompt_s": 46.7,
+   "gen_tokens": 193882,
+   "gen_s": 1672.1
+  }
+ },
+ {
+  "run": "mit-windowed-r1",
+  "task": "mit-windowed",
+  "hidden": {
+   "passed": 718,
+   "failed": 9,
+   "errors": 0,
+   "rc": 1,
+   "ok": false,
+   "seconds": 7.7
+  },
+  "suite": {
+   "passed": 720,
+   "failed": 8,
+   "errors": 0,
+   "rc": 1,
+   "ok": false,
+   "seconds": 7.6
+  },
+  "turn_status": [
+   "exit 1"
+  ],
+  "seconds": 381.8,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 27387,
+   "output": 33369,
+   "reasoning": 0,
+   "cache": {
+    "read": 481272,
+    "write": 0
+   }
+  },
+  "steps": 16,
+  "tools": {
+   "shell": 7,
+   "glob": 1,
+   "grep": 2,
+   "read": 3,
+   "edit": 4
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [
+   [
+    "error",
+    "{\"type\": \"compaction.failed\", \"message\": \"Compaction summary reached the output token limit\"}"
+   ]
+  ],
+  "reasoning_chars": 54980,
+  "text_chars": 2350,
+  "server": {
+   "requests": 17,
+   "max_ctx": 65535,
+   "acceptance": 0.461,
+   "prompt_tokens": 27387,
+   "prompt_s": 28.0,
+   "gen_tokens": 60756,
+   "gen_s": 363.9
+  }
+ },
+ {
+  "run": "rust-expr-r1",
+  "task": "rust-expr",
+  "hidden": {
+   "passed": 7,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "suite": {
+   "passed": 17,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.0
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 469.9,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 21285,
+   "output": 41867,
+   "reasoning": 0,
+   "cache": {
+    "read": 937492,
+    "write": 0
+   }
+  },
+  "steps": 29,
+  "tools": {
+   "read": 11,
+   "write": 2,
+   "edit": 14,
+   "shell": 10
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 1,
+  "flags": [],
+  "reasoning_chars": 79412,
+  "text_chars": 2954,
+  "server": {
+   "requests": 30,
+   "max_ctx": 53040,
+   "acceptance": 0.412,
+   "prompt_tokens": 21285,
+   "prompt_s": 22.2,
+   "gen_tokens": 63152,
+   "gen_s": 463.7
+  }
+ }
+]

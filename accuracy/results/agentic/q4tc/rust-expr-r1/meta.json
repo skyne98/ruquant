@@ -1,0 +1,32 @@
+{
+ "label": "q4tc",
+ "task": "rust-expr",
+ "rep": 1,
+ "model": "llamacpp/qwen3.8-27b-w4a4",
+ "turns": [
+  {
+   "turn": 1,
+   "status": "ok",
+   "seconds": 511.2
+  }
+ ],
+ "started": 1793977574.2698495,
+ "session": "ses_e4e9a9b5cffeNPLwrRr40cGecM",
+ "seconds": 511.2,
+ "hidden": {
+  "passed": 7,
+  "failed": 0,
+  "errors": 0,
+  "rc": 0,
+  "ok": true,
+  "seconds": 0.2
+ },
+ "suite": {
+  "passed": 18,
+  "failed": 0,
+  "errors": 0,
+  "rc": 0,
+  "ok": true,
+  "seconds": 0.0
+ }
+}

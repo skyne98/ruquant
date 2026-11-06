@@ -1,0 +1,60 @@
+[
+ {
+  "run": "py-orders-bug-r1",
+  "task": "py-orders-bug",
+  "hidden": {
+   "passed": 11,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "suite": {
+   "passed": 8,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 264.8,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 11266,
+   "output": 12215,
+   "reasoning": 0,
+   "cache": {
+    "read": 260863,
+    "write": 0
+   }
+  },
+  "steps": 17,
+  "tools": {
+   "shell": 9,
+   "read": 8,
+   "execute": 1,
+   "grep": 1,
+   "edit": 2,
+   "write": 1
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [],
+  "reasoning_chars": 28829,
+  "text_chars": 3473,
+  "server": {
+   "requests": 17,
+   "max_ctx": 23465,
+   "acceptance": 0.411,
+   "prompt_tokens": 11266,
+   "prompt_s": 40.0,
+   "gen_tokens": 23481,
+   "gen_s": 263.0
+  }
+ }
+]

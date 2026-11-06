@@ -191,6 +191,37 @@ index f04be52..630cb8e 100644
  
  void ggml_vec_dot_mxfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
  void ggml_vec_dot_nvfp4_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
+diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
+index f1ebd4e..d204b5d 100644
+--- a/ggml/src/ggml-cuda/fattn.cu
++++ b/ggml/src/ggml-cuda/fattn.cu
+@@ -1,4 +1,5 @@
+ #include "common.cuh"
++#include "rq-fattn.cuh"
+ #include "fattn-common.cuh"
+ #include "fattn-mma-f16.cuh"
+ #include "fattn-tile.cuh"
+@@ -757,7 +758,8 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+     bool need_f16_K = false;
+     bool need_f16_V = false;
+ 
+-    switch (kernel) {
++    // the ruquant q4_0 kernel reads the cache as it is
++    switch (ggml_cuda_rq_fattn_q4_applies(dst) ? BEST_FATTN_KERNEL_NONE : kernel) {
+         case BEST_FATTN_KERNEL_TILE:
+         case BEST_FATTN_KERNEL_MMA_F16:
+             need_f16_K = true;
+@@ -780,6 +782,10 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+ 
+ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     ggml_cuda_set_device(ctx.device);
++    if (ggml_cuda_rq_fattn_q4_applies(dst)) {
++        ggml_cuda_rq_fattn_q4(ctx, dst);
++        return;
++    }
+     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+         case BEST_FATTN_KERNEL_NONE:
+             GGML_ABORT("fatal error");
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
 index 06956ce..c550198 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
@@ -385,6 +416,432 @@ index 1a9cf55..efd7a7d 100644
      if (!ggml_is_quantized(type)) {
          return false;
      }
+diff --git a/ggml/src/ggml-cuda/rq-fattn.cu b/ggml/src/ggml-cuda/rq-fattn.cu
+new file mode 100644
+index 0000000..6a05691
+--- /dev/null
++++ b/ggml/src/ggml-cuda/rq-fattn.cu
+@@ -0,0 +1,407 @@
++// ruquant attention over a q4_0 KV cache for decode and speculative-verify widths (1-16 query tokens), head size 256,
++// on NVIDIA INT4 tensor cores (Turing, Ampere, Ada). It is the CUDA counterpart of the gfx906 kernel in mx-llama.cpp
++// (rq-fattn.cu there, v_dot8 Q.K and v_dot2 P.V) with the same numerics:
++//   - The cache is llama.cpp's q4_0 with its attention rotation, so K and V are int4 with a scale per 32 values. Q is
++//     quantized per 32 values to int4 in q4_0's nibble order, the value of largest magnitude to -8, its scale times
++//     the softmax scale kept in f32. A q4_0 nibble q is q - 8 as a signed int4 after flipping its top bit.
++//   - Q.K: one m16n8k32 .s4 MMA per q4_0 block gives the block's exact int32 dot product, then s += dot * (dk * dq) in
++//     f32, block by block. Q is the A operand (16 query rows), K the B operand (8 tokens).
++//   - Online softmax per 64-token tile, P rounded to f16; P.V with f16 m16n8k16 MMAs (f32 accumulation) on V decoded
++//     to f16 as f16(d * (q - 8)), as the gfx906 kernel feeds v_dot2.
++//   - The KV sequence is split over the grid (chunks x KV heads); partial results go through llama.cpp's
++//     flash_attn_combine_results.
++// Wider batches (prefill) keep llama.cpp's kernels with an f16 Q, as on gfx906.
++#include "common.cuh"
++#include "fattn-common.cuh"
++#include "rq-fattn.cuh"
++
++#include <cstdlib>
++#include <cstring>
++
++#define RQ_FA_D     256
++#define RQ_FA_TILE  64
++#define RQ_FA_ROWW  37 // smem words per token row of K / V: 36 (8 q4_0 blocks of 18 bytes) + 1 against bank conflicts
++#define RQ_FA_SROW  68 // f32 words per query row of S (64 + 4 against bank conflicts); P is written over it as f16
++
++#define RQ_FA_TC_MIN_CC 750 // Turing: m8n8k32 .s4, m16n8k8 .f16
++#define RQ_FA_TC_MAX_CC 900 // Hopper and later have no INT4 MMA
++
++// the 4 bytes at byte offset o of a word array (o need not be aligned)
++static __device__ __forceinline__ int rq_fa_bytes(const int * w, int o) {
++    const int i = o >> 2, s = o & 3;
++    const unsigned lo = w[i], hi = w[i + 1];
++    return s == 0 ? (int) lo : (int) ((lo >> (8 * s)) | (hi << (32 - 8 * s)));
++}
++
++static __device__ __forceinline__ float rq_fa_half(const int * w, int o) { // f16 at an even byte offset
++    const unsigned v = (unsigned) w[o >> 2] >> (8 * (o & 3));
++    return __half2float(__ushort_as_half((unsigned short) (v & 0xffff)));
++}
++
++// d = a b over one q4_0 block, exact: a0 / a1 the Q words of rows gid / gid + 8, b the K word of token gid
++static __device__ __forceinline__ void rq_fa_mma_s4(int (&d)[4], int a0, int a1, int b) {
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s4.s4.s32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %7, %7, %7};"
++                 : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3]) : "r"(a0), "r"(a1), "r"(b), "r"(0));
++#elif !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
++    asm volatile("mma.sync.aligned.m8n8k32.row.col.s32.s4.s4.s32 {%0, %1}, {%2}, {%3}, {%4, %4};"
++                 : "=r"(d[0]), "=r"(d[1]) : "r"(a0), "r"(b), "r"(0));
++    asm volatile("mma.sync.aligned.m8n8k32.row.col.s32.s4.s4.s32 {%0, %1}, {%2}, {%3}, {%4, %4};"
++                 : "=r"(d[2]), "=r"(d[3]) : "r"(a1), "r"(b), "r"(0));
++#else
++    GGML_UNUSED(a0); GGML_UNUSED(a1); GGML_UNUSED(b);
++    d[0] = d[1] = d[2] = d[3] = 0;
++    NO_DEVICE_CODE;
++#endif
++}
++
++// d += a b, f16 operands, f32 accumulation: a the P fragment (16 rows x 16 tokens), b0 b1 the V fragment
++static __device__ __forceinline__ void rq_fa_mma_f16(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
++                 "{%0, %1, %2, %3};"
++                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
++                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
++#elif !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
++    asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
++                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]) : "r"(a[0]), "r"(a[1]), "r"(b0));
++    asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
++                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]) : "r"(a[2]), "r"(a[3]), "r"(b1));
++#else
++    GGML_UNUSED(d); GGML_UNUSED(a); GGML_UNUSED(b0); GGML_UNUSED(b1);
++    NO_DEVICE_CODE;
++#endif
++}
++
++// the value of larger magnitude, the negative one on a tie (as the gfx906 kernel)
++static __device__ __forceinline__ float rq_fa_absmax(float a, float b) {
++    return fabsf(b) > fabsf(a) || (fabsf(b) == fabsf(a) && b < a) ? b : a;
++}
++
++// Q rows to int4 nibbles in q4_0 order: word j of block b holds elements 4j..4j+3 in its even nibbles and
++// 4j+16..4j+19 in its odd ones. Row r of KV head g is query head g * gqa + r / ncols, query token r % ncols. One warp
++// per row, 8 values per lane (lane % 4 = which 8 of block lane / 4). Qq [row][8][4], Qd [row][8] (scale times the
++// softmax scale).
++static __global__ void __launch_bounds__(32) rq_fa_quant_q(const char * __restrict__ Q, size_t nb1, size_t nb2, int ncols, int gqa,
++                                                           float scale, int * __restrict__ Qq, float * __restrict__ Qd) {
++    const int h = blockIdx.x / ncols, j = blockIdx.x % ncols;
++    const int R = gqa * ncols, row = (h / gqa) * R + (h % gqa) * ncols + j;
++    const int lane = threadIdx.x, b = lane / 4, part = lane % 4;
++    const float4 * x = (const float4 *) ((const float *) (Q + (size_t) j * nb1 + (size_t) h * nb2) + 8 * lane);
++    const float4 v0 = x[0], v1 = x[1];
++    const float xs[8] = { v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w };
++    float m = xs[0];
++#pragma unroll
++    for (int k = 1; k < 8; ++k) m = rq_fa_absmax(m, xs[k]);
++    m = rq_fa_absmax(m, __shfl_xor_sync(0xffffffff, m, 1, 32));
++    m = rq_fa_absmax(m, __shfl_xor_sync(0xffffffff, m, 2, 32));
++    const float d = m / -8.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
++    // elements 8 part + k: parts 0 / 1 are the even nibbles of words 0-1 / 2-3, parts 2 / 3 their odd nibbles
++    const int odd = part / 2;
++    unsigned w[2] = { 0u, 0u };
++#pragma unroll
++    for (int k = 0; k < 8; ++k) {
++        const int q = (int) rintf(fminf(fmaxf(xs[k] * id, -8.0f), 7.0f));
++        w[k / 4] |= (unsigned) (q & 15) << (4 * (2 * (k % 4) + odd));
++    }
++    w[0] |= __shfl_xor_sync(0xffffffff, w[0], 2, 32);
++    w[1] |= __shfl_xor_sync(0xffffffff, w[1], 2, 32);
++    if (part < 2) {
++        Qq[((size_t) row * 8 + b) * 4 + 2 * part]     = (int) w[0];
++        Qq[((size_t) row * 8 + b) * 4 + 2 * part + 1] = (int) w[1];
++    }
++    if (part == 0) Qd[(size_t) row * 8 + b] = d * scale;
++}
++
++template <int MT>
++static constexpr size_t rq_fa_smem_bytes() {
++    return sizeof(int) * (2 * RQ_FA_TILE * RQ_FA_ROWW + MT * 8 * 64) +
++           sizeof(float) * (16 * MT * 8 + 16 * MT * RQ_FA_SROW + 16 * RQ_FA_TILE + 3 * 16 * MT);
++}
++
++// grid (chunks, KV heads), NW warps. R = gqa * ncols query rows per KV head, at most 16 MT.
++template <int MT, int NW>
++static __global__ void __launch_bounds__(32 * NW) rq_fa_tc_kernel(
++        const int * __restrict__ Qq, const float * __restrict__ Qd, const char * __restrict__ K, const char * __restrict__ V,
++        const char * __restrict__ mask, float * __restrict__ parts, float2 * __restrict__ meta, float * __restrict__ dst,
++        size_t nbk1, size_t nbk2, size_t nbv1, size_t nbv2, size_t nbm1,
++        int R, int ncols, int gqa, int nheads, int n_kv, int chunk) {
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
++    constexpr int RMAX = 16 * MT, CT = RQ_FA_D / 8 / NW; // channel tiles of 8 per warp in P.V
++    extern __shared__ int rq_fa_smem[];
++    int   * ks = rq_fa_smem;                       // [TILE][ROWW] raw q4_0 rows
++    int   * vs = ks + RQ_FA_TILE * RQ_FA_ROWW;     // [TILE][ROWW]
++    int   * qf = vs + RQ_FA_TILE * RQ_FA_ROWW;     // Q fragments [MT][8 blocks][32 lanes][2]
++    float * qd = (float *) (qf + MT * 8 * 64);     // [RMAX][8]
++    float * sp = qd + RMAX * 8;                    // S [RMAX][SROW], then P (f16) over it
++    float * mk = sp + RMAX * RQ_FA_SROW;           // the tile's mask per query token [16][TILE]
++    float * ms = mk + 16 * RQ_FA_TILE, * ls = ms + RMAX, * as = ls + RMAX;
++
++    const int g = blockIdx.y, nchunks = gridDim.x;
++    const int t_begin = blockIdx.x * chunk, t_end = min(t_begin + chunk, n_kv);
++    const int lane = threadIdx.x % 32, warp = threadIdx.x / 32, gid = lane / 4, tig = lane % 4;
++    const char * Kg = K + (size_t) g * nbk2;
++    const char * Vg = V + (size_t) g * nbv2;
++
++    // Q fragments: (m-tile, block, lane) holds row 16 mt + gid's word tig and row + 8's; rows past R are zero
++    for (int i = threadIdx.x; i < MT * 8 * 32; i += 32 * NW) {
++        const int mt = i / 256, b = (i / 32) % 8, l = i % 32, r0 = mt * 16 + l / 4, wd = l % 4;
++        qf[2 * i]     = r0 < R ? Qq[(((size_t) g * R + r0) * 8 + b) * 4 + wd] : 0;
++        qf[2 * i + 1] = r0 + 8 < R ? Qq[(((size_t) g * R + r0 + 8) * 8 + b) * 4 + wd] : 0;
++    }
++    for (int i = threadIdx.x; i < RMAX * 8; i += 32 * NW) qd[i] = i / 8 < R ? Qd[(size_t) g * R * 8 + i] : 0.0f;
++    for (int r = threadIdx.x; r < RMAX; r += 32 * NW) {
++        ms[r] = -INFINITY;
++        ls[r] = 0.0f;
++        as[r] = 1.0f;
++    }
++    // rows past R keep S = 0 and so P = 0 (two zero halves are a zero float)
++    for (int i = threadIdx.x; i < RMAX * RQ_FA_SROW; i += 32 * NW) sp[i] = 0.0f;
++
++    float o[MT][CT][4];
++#pragma unroll
++    for (int mt = 0; mt < MT; ++mt)
++#pragma unroll
++        for (int ct = 0; ct < CT; ++ct)
++#pragma unroll
++            for (int i = 0; i < 4; ++i) o[mt][ct][i] = 0.0f;
++    const int c0 = warp * CT * 8; // this warp's first output channel
++
++    for (int t0 = t_begin; t0 < t_end; t0 += RQ_FA_TILE) {
++        __syncthreads(); // the previous tile's P.V is done with ks, vs and P
++        for (int i = threadIdx.x; i < RQ_FA_TILE * 36; i += 32 * NW) {
++            const int tr = i / 36, cw = i % 36;
++            const bool in = t0 + tr < t_end;
++            ks[tr * RQ_FA_ROWW + cw] = in ? *(const int *) (Kg + (size_t) (t0 + tr) * nbk1 + 4 * cw) : 0;
++            vs[tr * RQ_FA_ROWW + cw] = in ? *(const int *) (Vg + (size_t) (t0 + tr) * nbv1 + 4 * cw) : 0;
++        }
++        for (int i = threadIdx.x; i < ncols * RQ_FA_TILE; i += 32 * NW) {
++            const int col = i / RQ_FA_TILE, tt = i % RQ_FA_TILE;
++            const bool in = t0 + tt < t_end;
++            mk[i] = !in ? -INFINITY : mask ? __half2float(((const half *) (mask + (size_t) col * nbm1))[t0 + tt]) : 0.0f;
++        }
++        __syncthreads();
++
++        // S = Q K^T: warp w takes the 8-token tiles w, w + NW, ...
++        for (int nt = warp; nt < RQ_FA_TILE / 8; nt += NW) {
++            const int * kr  = ks + (nt * 8 + gid) * RQ_FA_ROWW;     // B operand: token gid of the tile
++            const int * kc0 = ks + (nt * 8 + 2 * tig) * RQ_FA_ROWW; // C columns: tokens 2 tig, 2 tig + 1
++            const int * kc1 = kc0 + RQ_FA_ROWW;
++            float s[MT][4];
++#pragma unroll
++            for (int mt = 0; mt < MT; ++mt)
++#pragma unroll
++                for (int i = 0; i < 4; ++i) s[mt][i] = 0.0f;
++#pragma unroll
++            for (int b = 0; b < 8; ++b) {
++                const int kb = rq_fa_bytes(kr, 18 * b + 2 + 4 * tig) ^ 0x88888888;
++                const float dk0 = rq_fa_half(kc0, 18 * b), dk1 = rq_fa_half(kc1, 18 * b);
++#pragma unroll
++                for (int mt = 0; mt < MT; ++mt) {
++                    int d[4];
++                    rq_fa_mma_s4(d, qf[2 * ((mt * 8 + b) * 32 + lane)], qf[2 * ((mt * 8 + b) * 32 + lane) + 1], kb);
++                    const float q0 = qd[(mt * 16 + gid) * 8 + b], q1 = qd[(mt * 16 + gid + 8) * 8 + b];
++                    s[mt][0] += (float) d[0] * (dk0 * q0);
++                    s[mt][1] += (float) d[1] * (dk1 * q0);
++                    s[mt][2] += (float) d[2] * (dk0 * q1);
++                    s[mt][3] += (float) d[3] * (dk1 * q1);
++                }
++            }
++#pragma unroll
++            for (int mt = 0; mt < MT; ++mt)
++#pragma unroll
++                for (int i = 0; i < 4; ++i) {
++                    const int r = mt * 16 + gid + 8 * (i / 2), t = nt * 8 + 2 * tig + i % 2;
++                    if (r < R) sp[r * RQ_FA_SROW + t] = s[mt][i] + mk[(r % ncols) * RQ_FA_TILE + t];
++                }
++        }
++        __syncthreads();
++
++        // online softmax: warp w takes rows w, w + NW, ...; a lane tokens lane and lane + 32
++        for (int r = warp; r < R; r += NW) {
++            float * row = sp + r * RQ_FA_SROW;
++            const float s0 = row[lane], s1 = row[lane + 32];
++            const float mt_ = warp_reduce_max<32>(fmaxf(s0, s1));
++            const float m_old = ms[r];
++            const float m_new = fmaxf(m_old, mt_);
++            const float p0 = m_new == -INFINITY ? 0.0f : __expf(s0 - m_new);
++            const float p1 = m_new == -INFINITY ? 0.0f : __expf(s1 - m_new);
++            const float lt = warp_reduce_sum<32>(p0 + p1);
++            __syncwarp();
++            half * prow = (half *) row;
++            prow[lane]      = __float2half(p0);
++            prow[lane + 32] = __float2half(p1);
++            if (lane == 0) {
++                const float alpha = m_new == -INFINITY ? 1.0f : __expf(m_old - m_new);
++                ms[r] = m_new;
++                ls[r] = ls[r] * alpha + lt;
++                as[r] = alpha;
++            }
++        }
++        __syncthreads();
++
++        // P.V: this warp's channels c0 .. c0 + 8 CT - 1 for every row
++#pragma unroll
++        for (int mt = 0; mt < MT; ++mt) {
++            const float a0 = as[mt * 16 + gid], a1 = as[mt * 16 + gid + 8];
++#pragma unroll
++            for (int ct = 0; ct < CT; ++ct) {
++                o[mt][ct][0] *= a0;
++                o[mt][ct][1] *= a0;
++                o[mt][ct][2] *= a1;
++                o[mt][ct][3] *= a1;
++            }
++        }
++        const half * P = (const half *) sp;
++#pragma unroll
++        for (int kt = 0; kt < RQ_FA_TILE / 16; ++kt) {
++            uint32_t pa[MT][4];
++#pragma unroll
++            for (int mt = 0; mt < MT; ++mt) {
++                const half * p0 = P + (size_t) (mt * 16 + gid) * (2 * RQ_FA_SROW) + kt * 16 + 2 * tig;
++                const half * p1 = p0 + 8 * (2 * RQ_FA_SROW);
++                pa[mt][0] = *(const uint32_t *) p0;
++                pa[mt][1] = *(const uint32_t *) p1;
++                pa[mt][2] = *(const uint32_t *) (p0 + 8);
++                pa[mt][3] = *(const uint32_t *) (p1 + 8);
++            }
++            const int tA = kt * 16 + 2 * tig; // B rows (tokens) tA, tA + 1, tA + 8, tA + 9
++#pragma unroll
++            for (int ct = 0; ct < CT; ++ct) {
++                const int c = c0 + ct * 8 + gid, cb = c / 32, cbyte = cb * 18 + 2 + (c % 16), csh = 4 * ((c % 32) / 16);
++                half v[4];
++#pragma unroll
++                for (int k = 0; k < 4; ++k) {
++                    const int * vr = vs + (tA + (k % 2) + 8 * (k / 2)) * RQ_FA_ROWW;
++                    const int q = (((unsigned) vr[cbyte >> 2] >> (8 * (cbyte & 3) + csh)) & 15) - 8;
++                    v[k] = __float2half(rq_fa_half(vr, 18 * cb) * (float) q);
++                }
++                const half2 vb0 = __halves2half2(v[0], v[1]), vb1 = __halves2half2(v[2], v[3]);
++                const uint32_t b0 = *(const uint32_t *) &vb0, b1 = *(const uint32_t *) &vb1;
++#pragma unroll
++                for (int mt = 0; mt < MT; ++mt) rq_fa_mma_f16(o[mt][ct], pa[mt], b0, b1);
++            }
++        }
++    }
++
++    // the chunk's unnormalized sums and (max, sum) per row, or the normalized output if there is one chunk
++    __syncthreads();
++#pragma unroll
++    for (int mt = 0; mt < MT; ++mt)
++#pragma unroll
++        for (int ct = 0; ct < CT; ++ct)
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                const int r = mt * 16 + gid + 8 * (i / 2), c = c0 + ct * 8 + 2 * tig + i % 2;
++                if (r >= R) continue;
++                const int h = g * gqa + r / ncols, col = r % ncols;
++                const size_t jdst = (size_t) col * nheads + h;
++                if (nchunks == 1) {
++                    dst[jdst * RQ_FA_D + c] = ls[r] > 0.0f ? o[mt][ct][i] / ls[r] : 0.0f;
++                } else {
++                    parts[(jdst * nchunks + blockIdx.x) * RQ_FA_D + c] = o[mt][ct][i];
++                }
++            }
++    if (nchunks > 1) {
++        for (int r = threadIdx.x; r < R; r += 32 * NW) {
++            const int h = g * gqa + r / ncols, col = r % ncols;
++            meta[((size_t) col * nheads + h) * nchunks + blockIdx.x] = make_float2(ms[r], ls[r]);
++        }
++    }
++#else
++    GGML_UNUSED(Qq); GGML_UNUSED(Qd); GGML_UNUSED(K); GGML_UNUSED(V); GGML_UNUSED(mask); GGML_UNUSED(parts); GGML_UNUSED(meta);
++    GGML_UNUSED(dst); GGML_UNUSED(nbk1); GGML_UNUSED(nbk2); GGML_UNUSED(nbv1); GGML_UNUSED(nbv2); GGML_UNUSED(nbm1);
++    GGML_UNUSED(R); GGML_UNUSED(ncols); GGML_UNUSED(gqa); GGML_UNUSED(nheads); GGML_UNUSED(n_kv); GGML_UNUSED(chunk);
++    NO_DEVICE_CODE;
++#endif
++}
++
++static int rq_fa_mode() {
++    // on by default (int4 Q); RQ_FA_DOT8=0 keeps llama.cpp's kernels
++    static const int mode = getenv("RQ_FA_DOT8") ? atoi(getenv("RQ_FA_DOT8")) : 1;
++    return mode;
++}
++
++bool ggml_cuda_rq_fattn_q4_applies(const ggml_tensor * dst) {
++#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
++    GGML_UNUSED(dst);
++    return false;
++#else
++    const ggml_tensor * Q = dst->src[0];
++    const ggml_tensor * K = dst->src[1];
++    const ggml_tensor * V = dst->src[2];
++    const ggml_tensor * mask  = dst->src[3];
++    const ggml_tensor * sinks = dst->src[4];
++    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
++    if (rq_fa_mode() == 0 || !GGML_CUDA_CC_IS_NVIDIA(cc) || cc < RQ_FA_TC_MIN_CC || cc >= RQ_FA_TC_MAX_CC) {
++        return false;
++    }
++    float max_bias = 0.0f, softcap = 0.0f;
++    memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
++    memcpy(&softcap, (const float *) dst->op_params + 2, sizeof(float));
++    return K->type == GGML_TYPE_Q4_0 && V->type == GGML_TYPE_Q4_0 && Q->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
++           K->ne[0] == RQ_FA_D && V->ne[0] == RQ_FA_D && Q->ne[0] == RQ_FA_D && Q->ne[1] <= 16 && Q->ne[3] == 1 && K->ne[3] == 1 &&
++           Q->ne[2] % K->ne[2] == 0 && (Q->ne[2] / K->ne[2]) * Q->ne[1] <= 96 && K->ne[1] % RQ_FA_TILE == 0 &&
++           Q->nb[0] == sizeof(float) && Q->nb[1] % 16 == 0 && Q->nb[2] % 16 == 0 && K->nb[1] % 4 == 0 && K->nb[2] % 4 == 0 &&
++           V->nb[1] % 4 == 0 && V->nb[2] % 4 == 0 && (!mask || (mask->type == GGML_TYPE_F16 && mask->ne[2] == 1 && mask->ne[3] == 1)) &&
++           !sinks && max_bias == 0.0f && softcap == 0.0f;
++#endif
++}
++
++template <int MT, int NW>
++static void rq_fa_launch(dim3 grid, cudaStream_t s, const int * Qq, const float * Qd, const ggml_tensor * K, const ggml_tensor * V,
++                         const ggml_tensor * mask, float * parts, float2 * meta, float * dst, int R, int ncols, int gqa, int nheads,
++                         int chunk) {
++    constexpr size_t smem = rq_fa_smem_bytes<MT>();
++    static bool attr_set[GGML_CUDA_MAX_DEVICES] = {};
++    const int dev = ggml_cuda_get_device();
++    if (!attr_set[dev]) {
++        CUDA_CHECK(cudaFuncSetAttribute(rq_fa_tc_kernel<MT, NW>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) smem));
++        attr_set[dev] = true;
++    }
++    rq_fa_tc_kernel<MT, NW><<<grid, 32 * NW, smem, s>>>(Qq, Qd, (const char *) K->data, (const char *) V->data,
++                                                        mask ? (const char *) mask->data : nullptr, parts, meta, dst, K->nb[1], K->nb[2],
++                                                        V->nb[1], V->nb[2], mask ? mask->nb[1] : 0, R, ncols, gqa, nheads,
++                                                        (int) K->ne[1], chunk);
++}
++
++void ggml_cuda_rq_fattn_q4(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * Q = dst->src[0];
++    const ggml_tensor * K = dst->src[1];
++    const ggml_tensor * V = dst->src[2];
++    const ggml_tensor * mask = dst->src[3];
++    cudaStream_t s = ctx.stream();
++    float scale = 1.0f;
++    memcpy(&scale, (const float *) dst->op_params + 0, sizeof(float));
++
++    const int ncols = (int) Q->ne[1], nheads = (int) Q->ne[2], nkvh = (int) K->ne[2];
++    const int gqa = nheads / nkvh, R = gqa * ncols;
++
++    ggml_cuda_pool_alloc<int>   Qq(ctx.pool(), (size_t) nheads * ncols * 32);
++    ggml_cuda_pool_alloc<float> Qd(ctx.pool(), (size_t) nheads * ncols * 8);
++    rq_fa_quant_q<<<nheads * ncols, 32, 0, s>>>((const char *) Q->data, Q->nb[1], Q->nb[2], ncols, gqa, scale, Qq.get(), Qd.get());
++
++    // the KV sequence over ~2 blocks per SM, whole tiles each
++    const int ntiles = (int) K->ne[1] / RQ_FA_TILE;
++    const int nsm = ggml_cuda_info().devices[ggml_cuda_get_device()].nsm;
++    static const int env_chunks = getenv("RQ_FA_CHUNKS") ? atoi(getenv("RQ_FA_CHUNKS")) : 0;
++    int nchunks = env_chunks > 0 ? env_chunks : std::max(1, std::min(ntiles, (2 * nsm + nkvh - 1) / nkvh));
++    const int chunk = (ntiles + nchunks - 1) / nchunks * RQ_FA_TILE;
++    nchunks = (int) ((K->ne[1] + chunk - 1) / chunk);
++
++    ggml_cuda_pool_alloc<float>  parts(ctx.pool(), nchunks > 1 ? (size_t) nchunks * nheads * ncols * RQ_FA_D : 1);
++    ggml_cuda_pool_alloc<float2> meta(ctx.pool(), nchunks > 1 ? (size_t) nchunks * nheads * ncols : 1);
++    const dim3 grid(nchunks, nkvh, 1);
++    float * d = (float *) dst->data;
++    // P.V keeps 4 MT x (32 / NW) accumulators per thread: 4 warps up to 32 rows, 8 beyond
++    if (R <= 16)      rq_fa_launch<1, 4>(grid, s, Qq.get(), Qd.get(), K, V, mask, parts.get(), meta.get(), d, R, ncols, gqa, nheads, chunk);
++    else if (R <= 32) rq_fa_launch<2, 4>(grid, s, Qq.get(), Qd.get(), K, V, mask, parts.get(), meta.get(), d, R, ncols, gqa, nheads, chunk);
++    else if (R <= 48) rq_fa_launch<3, 8>(grid, s, Qq.get(), Qd.get(), K, V, mask, parts.get(), meta.get(), d, R, ncols, gqa, nheads, chunk);
++    else if (R <= 64) rq_fa_launch<4, 8>(grid, s, Qq.get(), Qd.get(), K, V, mask, parts.get(), meta.get(), d, R, ncols, gqa, nheads, chunk);
++    else              rq_fa_launch<6, 8>(grid, s, Qq.get(), Qd.get(), K, V, mask, parts.get(), meta.get(), d, R, ncols, gqa, nheads, chunk);
++    if (nchunks > 1) {
++        flash_attn_combine_results<RQ_FA_D><<<dim3(ncols, nheads, 1), RQ_FA_D, nchunks * sizeof(float2), s>>>(
++            parts.get(), meta.get(), d, nchunks);
++    }
++    CUDA_CHECK(cudaGetLastError());
++}
+diff --git a/ggml/src/ggml-cuda/rq-fattn.cuh b/ggml/src/ggml-cuda/rq-fattn.cuh
+new file mode 100644
+index 0000000..36e959c
+--- /dev/null
++++ b/ggml/src/ggml-cuda/rq-fattn.cuh
+@@ -0,0 +1,7 @@
++#pragma once
++#include "common.cuh"
++
++// ruquant attention over a q4_0 KV cache at decode / verify widths with int4 x int4 Q.K on NVIDIA INT4 tensor cores
++// (rq-fattn.cu; mx-llama.cpp has the gfx906 v_dot8 version). Env RQ_FA_DOT8: 1 int4 Q (default), 0 off.
++bool ggml_cuda_rq_fattn_q4_applies(const ggml_tensor * dst);
++void ggml_cuda_rq_fattn_q4(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 diff --git a/ggml/src/ggml-cuda/rq-w4a4-gemm.cuh b/ggml/src/ggml-cuda/rq-w4a4-gemm.cuh
 new file mode 100644
 index 0000000..eb4b9d1
@@ -905,18 +1362,243 @@ index 0000000..ef2eea0
 +            if (t < epi.M) epi.D[(size_t) t * epi.ldd + n] = rq_epi_value(epi, rq_load_l2(&acc[(size_t) t * N + n]), t, n);
 +        }
 +}
+diff --git a/ggml/src/ggml-cuda/rq-w4a4-tc.cuh b/ggml/src/ggml-cuda/rq-w4a4-tc.cuh
+new file mode 100644
+index 0000000..b85fcda
+--- /dev/null
++++ b/ggml/src/ggml-cuda/rq-w4a4-tc.cuh
+@@ -0,0 +1,218 @@
++#pragma once
++// ruquant W4A4 on NVIDIA INT4 tensor cores (Turing, Ampere, Ada: mma.sync with .s4 operands; Hopper and Blackwell
++// dropped them). One activation group of 64 inputs is exactly one m16n8k64 MMA, so the group's code products come
++// out of the tensor core as an exact int32 and the rest is the skinny kernel's integer fold (rq-w4a4-skinny.cuh):
++// sum = (8 - z) colsum + code products, here preloaded into the MMA accumulator; tot += (k m sum) >> RQ_TERM_SHIFT;
++// y = ((fp32(tot) * 2^RQ_TERM_SHIFT) * u) * s_w. Bit-exact with the CPU reference and the gfx906 dot8 kernels.
++//
++// The weight is the A operand (16 channels x 64 inputs), the activation the B operand (64 inputs x 8 tokens), so a
++// decode step (1 token) or a DFlash2 verify (8 tokens) is one n8 tile. Weights are repacked once, in place, into the
++// MMA's fragment order: tile (channel tile c16, group g) is 32 lanes x 16 B, lane = 4 * gid + tig holding the code
++// words (channel gid, word tig), (gid + 8, tig), (gid, tig + 4), (gid + 8, tig + 4) of the group's 8 words. A warp
++// reads its 512 B tile with one coalesced 16 B load per lane and feeds it to the MMA as is. Next to it, per tile, one
++// word per gid: the group's colsum and weight multiplier for channels gid and gid + 8 (12 + 4 bits each).
++// Layout of the repacked tensor: [codes N K / 2 B | s_w N floats | ck (N / 16) (K / 64) 8 words].
++#include <stdint.h>
++
++#define RQ_TC_MIN_CC 750 // Turing: m8n8k32 .s4
++#define RQ_TC_MAX_CC 900 // Hopper and later have no INT4 MMA
++
++static __host__ __device__ __forceinline__ size_t rq_tc_w_index(int channel, int k_word, int Kw) {
++    const int c16 = channel / 16, r = channel % 16, g = k_word / 8, w = k_word % 8;
++    const int lane = (r % 8) * 4 + w % 4, slot = r / 8 + 2 * (w / 4);
++    return (((size_t) c16 * (Kw / 8) + g) * 32 + lane) * 4 + slot;
++}
++
++// ck word of tile (c16, g) for gid: channel gid in the low half, gid + 8 in the high half, each colsum (12-bit signed,
++// |colsum| <= 512) | k << 12 (k in 1..15)
++static __host__ __device__ __forceinline__ size_t rq_tc_ck_index(int c16, int g, int gid, int ng) {
++    return ((size_t) c16 * ng + g) * 8 + gid;
++}
++
++// d = a b + c over one group: a the weight fragment, b0 b1 the activation words of this lane's token, exact int32
++static __device__ __forceinline__ void rq_tc_mma(int (&d)[4], const int4 a, const int b0, const int b1, const int (&c)[4]) {
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++    asm volatile("mma.sync.aligned.m16n8k64.row.col.s32.s4.s4.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
++                 "{%10, %11, %12, %13};"
++                 : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
++                 : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b0), "r"(b1), "r"(c[0]), "r"(c[1]), "r"(c[2]), "r"(c[3]));
++#elif !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
++    // Turing: the same fragments as four m8n8k32 (rows 0-7 / 8-15, inputs 0-31 / 32-63)
++    int t0, t1, t2, t3;
++    asm volatile("mma.sync.aligned.m8n8k32.row.col.s32.s4.s4.s32 {%0, %1}, {%2}, {%3}, {%4, %5};"
++                 : "=r"(t0), "=r"(t1) : "r"(a.x), "r"(b0), "r"(c[0]), "r"(c[1]));
++    asm volatile("mma.sync.aligned.m8n8k32.row.col.s32.s4.s4.s32 {%0, %1}, {%2}, {%3}, {%4, %5};"
++                 : "=r"(d[0]), "=r"(d[1]) : "r"(a.z), "r"(b1), "r"(t0), "r"(t1));
++    asm volatile("mma.sync.aligned.m8n8k32.row.col.s32.s4.s4.s32 {%0, %1}, {%2}, {%3}, {%4, %5};"
++                 : "=r"(t2), "=r"(t3) : "r"(a.y), "r"(b0), "r"(c[2]), "r"(c[3]));
++    asm volatile("mma.sync.aligned.m8n8k32.row.col.s32.s4.s4.s32 {%0, %1}, {%2}, {%3}, {%4, %5};"
++                 : "=r"(d[2]), "=r"(d[3]) : "r"(a.w), "r"(b1), "r"(t2), "r"(t3));
++#else
++    GGML_UNUSED(a); GGML_UNUSED(b0); GGML_UNUSED(b1);
++    d[0] = c[0]; d[1] = c[1]; d[2] = c[2]; d[3] = c[3];
++    NO_DEVICE_CODE;
++#endif
++}
++
++// One weight per launch. A warp owns MT channel tiles (16 each) x NT token tiles (8 each); a block WN x WT warps.
++// Aq [Mp][Kw] token-major codes, mz [K / 64][Mp] (m | z << 8), sa [Mp]; Wf, sw, ck the repacked weight; D [M][ldd].
++// gz: groups per K split (gridDim.z splits); with splits, acc [Mp][N] and cnt [gridDim.x * gridDim.y] start at zero.
++// grid (ceil(N / (16 MT WN)), Mp / (8 NT WT), splits); Mp a multiple of 8 NT WT; N a multiple of 16.
++template <int MT, int NT, int WN, int WT>
++static __global__ void __launch_bounds__(32 * WN * WT)
++rq_tc_kernel(const int32_t * __restrict__ Aq, const int32_t * __restrict__ mz, const float * __restrict__ sa,
++             const int4 * __restrict__ Wf, const float * __restrict__ sw, const uint32_t * __restrict__ ck,
++             float * __restrict__ D, int ldd, int N, int M, int Mp, int Kw, int gz,
++             int32_t * __restrict__ acc, int32_t * __restrict__ cnt) {
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
++    const int lane = threadIdx.x % 32, gid = lane / 4, tig = lane % 4;
++    const int warp = threadIdx.x / 32, wn = warp % WN, wt = warp / WN;
++    const int c16_0 = (blockIdx.x * WN + wn) * MT;
++    const int tok0 = (blockIdx.y * WT + wt) * NT * 8;
++    const int ng = Kw / 8;
++    const int g_lo = blockIdx.z * gz, g_hi = min(g_lo + gz, ng);
++    const int n_c16 = N / 16;
++
++    int tot[MT][NT][4];
++#pragma unroll
++    for (int mt = 0; mt < MT; ++mt)
++#pragma unroll
++        for (int nt = 0; nt < NT; ++nt)
++#pragma unroll
++            for (int i = 0; i < 4; ++i) tot[mt][nt][i] = 0;
++
++    // tiles past N (the last block of a shape that is not a multiple of the block) re-read the last tile
++    int c16[MT];
++#pragma unroll
++    for (int mt = 0; mt < MT; ++mt) c16[mt] = min(c16_0 + mt, n_c16 - 1);
++    const int32_t * ap[NT];
++#pragma unroll
++    for (int nt = 0; nt < NT; ++nt) ap[nt] = Aq + (size_t) (tok0 + nt * 8 + gid) * Kw + tig;
++
++    // Decode streams the weights at ~720 GB/s (ncu), as fast as the skinny dot8 kernel. Neither register double
++    // buffering (40 -> 69 registers, prefill 139: one block per SM; both slower) nor rotating each warp's start group
++    // against DRAM channel conflicts helped
++#pragma unroll 2
++    for (int g = g_lo; g < g_hi; ++g) {
++        int4 w[MT];
++        uint32_t ckw[MT];
++#pragma unroll
++        for (int mt = 0; mt < MT; ++mt) {
++            w[mt]   = Wf[((size_t) c16[mt] * ng + g) * 32 + lane];
++            ckw[mt] = ck[rq_tc_ck_index(c16[mt], g, gid, ng)];
++        }
++        int b0[NT], b1[NT];
++        int2 mzv[NT];
++#pragma unroll
++        for (int nt = 0; nt < NT; ++nt) {
++            b0[nt]  = ap[nt][g * 8];
++            b1[nt]  = ap[nt][g * 8 + 4];
++            mzv[nt] = *reinterpret_cast<const int2 *>(mz + (size_t) g * Mp + tok0 + nt * 8 + 2 * tig);
++        }
++#pragma unroll
++        for (int mt = 0; mt < MT; ++mt) {
++            const int cs0 = (int) (ckw[mt] << 20) >> 20, k0 = (ckw[mt] >> 12) & 0xF;
++            const int cs1 = (int) (ckw[mt] << 4) >> 20,  k1 = ckw[mt] >> 28;
++#pragma unroll
++            for (int nt = 0; nt < NT; ++nt) {
++                const int zc0 = 8 - (mzv[nt].x >> 8), m0 = mzv[nt].x & 0xff;
++                const int zc1 = 8 - (mzv[nt].y >> 8), m1 = mzv[nt].y & 0xff;
++                const int c[4] = { zc0 * cs0, zc1 * cs0, zc0 * cs1, zc1 * cs1 };
++                int d[4];
++                rq_tc_mma(d, w[mt], b0[nt], b1[nt], c);
++                // k m <= 15 * 255 and |sum| <= 2^15: the products fit int32, as in the dot8 kernels
++                tot[mt][nt][0] += (k0 * m0 * d[0]) >> RQ_TERM_SHIFT;
++                tot[mt][nt][1] += (k0 * m1 * d[1]) >> RQ_TERM_SHIFT;
++                tot[mt][nt][2] += (k1 * m0 * d[2]) >> RQ_TERM_SHIFT;
++                tot[mt][nt][3] += (k1 * m1 * d[3]) >> RQ_TERM_SHIFT;
++            }
++        }
++    }
++
++    // output (mt, nt, i): channel 16 c16 + gid + 8 (i / 2), token tok0 + 8 nt + 2 tig + i % 2
++    if (gridDim.z > 1) { // split-K: add the partial sums; the last block of the tile writes them out
++#pragma unroll
++        for (int mt = 0; mt < MT; ++mt) {
++            if (c16_0 + mt >= n_c16) continue;
++#pragma unroll
++            for (int nt = 0; nt < NT; ++nt)
++#pragma unroll
++                for (int i = 0; i < 4; ++i) {
++                    const int t = tok0 + nt * 8 + 2 * tig + i % 2, n = (c16_0 + mt) * 16 + gid + 8 * (i / 2);
++                    if (t < M) atomicAdd(acc + (size_t) t * N + n, tot[mt][nt][i]);
++                }
++        }
++        __threadfence();
++        __shared__ int last;
++        __syncthreads();
++        if (threadIdx.x == 0) last = atomicAdd(&cnt[blockIdx.y * gridDim.x + blockIdx.x], 1) == (int) gridDim.z - 1;
++        __syncthreads();
++        if (!last) return;
++        __threadfence();
++#pragma unroll
++        for (int mt = 0; mt < MT; ++mt) {
++            if (c16_0 + mt >= n_c16) continue;
++#pragma unroll
++            for (int nt = 0; nt < NT; ++nt)
++#pragma unroll
++                for (int i = 0; i < 4; ++i) {
++                    const int t = tok0 + nt * 8 + 2 * tig + i % 2, n = (c16_0 + mt) * 16 + gid + 8 * (i / 2);
++                    if (t < M) tot[mt][nt][i] = __ldcg(acc + (size_t) t * N + n);
++                }
++        }
++    }
++#pragma unroll
++    for (int mt = 0; mt < MT; ++mt) {
++        if (c16_0 + mt >= n_c16) continue;
++#pragma unroll
++        for (int nt = 0; nt < NT; ++nt)
++#pragma unroll
++            for (int i = 0; i < 4; ++i) {
++                const int t = tok0 + nt * 8 + 2 * tig + i % 2, n = (c16_0 + mt) * 16 + gid + 8 * (i / 2);
++                if (t < M) {
++                    D[(size_t) t * ldd + n] =
++                        __fmul_rn(__fmul_rn(__fmul_rn(__int2float_rn(tot[mt][nt][i]), (float) (1 << RQ_TERM_SHIFT)), sa[t]), sw[n]);
++                }
++            }
++    }
++#else
++    GGML_UNUSED(Aq); GGML_UNUSED(mz); GGML_UNUSED(sa); GGML_UNUSED(Wf); GGML_UNUSED(sw); GGML_UNUSED(ck); GGML_UNUSED(D);
++    GGML_UNUSED(ldd); GGML_UNUSED(N); GGML_UNUSED(M); GGML_UNUSED(Mp); GGML_UNUSED(Kw); GGML_UNUSED(gz); GGML_UNUSED(acc);
++    GGML_UNUSED(cnt);
++    NO_DEVICE_CODE;
++#endif
++}
++
++// repack: thread per (channel, code word) from the original blocks (src) into the fragment order; word 0 also s_w
++static __global__ void rq_tc_repack_kernel(const uint8_t * __restrict__ src, int32_t * __restrict__ wf, float * __restrict__ sw,
++                                           int N, int K) {
++    const int Kw = K / 8;
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= (int64_t) N * Kw) return;
++    const int c = (int) (i / Kw), kw = (int) (i % Kw);
++    const uint8_t * row = src + (size_t) c * (K / QK_W4A4) * sizeof(block_w4a4);
++    wf[rq_tc_w_index(c, kw, Kw)] = *reinterpret_cast<const int32_t *>(row + (kw / 32) * sizeof(block_w4a4) + 16 + (kw % 32) * 4);
++    if (kw == 0) {
++        sw[c] = reinterpret_cast<const block_w4a4 *>(row)->d;
++    }
++}
++
++// ck: thread per (channel tile, group, gid)
++static __global__ void rq_tc_ck_kernel(const uint8_t * __restrict__ src, uint32_t * __restrict__ ck, int N, int K) {
++    const int ng = K / 64;
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= (int64_t) (N / 16) * ng * 8) return;
++    const int gid = (int) (i % 8), g = (int) ((i / 8) % ng), c16 = (int) (i / 8 / ng);
++    uint32_t word = 0;
++    for (int h = 0; h < 2; ++h) {
++        const int c = c16 * 16 + gid + 8 * h;
++        const block_w4a4 * b = reinterpret_cast<const block_w4a4 *>(src + ((size_t) c * (K / QK_W4A4) + g / 4) * sizeof(block_w4a4));
++        int sum = 0;
++        for (int w = (g % 4) * 8; w < (g % 4) * 8 + 8; ++w)
++#pragma unroll
++            for (int j = 0; j < 8; ++j) sum += (int32_t) (((b->qs[w] >> (4 * j)) & 0xF) << 28) >> 28;
++        const int k = RQ_W_MULT_G(b->sum, g % 4);
++        word |= (((uint32_t) sum & 0xFFFu) | ((uint32_t) k << 12)) << (16 * h);
++    }
++    ck[rq_tc_ck_index(c16, g, gid, ng)] = word;
++}
 diff --git a/ggml/src/ggml-cuda/rq-w4a4.cu b/ggml/src/ggml-cuda/rq-w4a4.cu
 new file mode 100644
-index 0000000..9c11a85
+index 0000000..016105a
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/rq-w4a4.cu
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,786 @@
 +#include "rq-w4a4.cuh"
 +#if defined(GGML_USE_HIP)
 +#pragma clang fp contract(off) // the _rn intrinsics below are plain ops on HIP: keep mul + add unfused
 +#endif
 +#include "rq-w4a4-skinny.cuh"
 +#include "rq-w4a4-gemm.cuh"
++#include "rq-w4a4-tc.cuh"
 +
 +#include <map>
 +#include <mutex>
@@ -929,8 +1611,8 @@ index 0000000..9c11a85
 +
 +// ruquant W4A4 on CUDA and HIP. Numerics follow the CPU reference in ggml-quants.c op for op (explicit _rn
 +// intrinsics, same Hadamard summation order, exact integer accumulation over the activation groups), so CPU and GPU
-+// give identical outputs. The GEMM is the skinny kernel (rq-w4a4-skinny.cuh) at verify widths and the tiled one
-+// (rq-w4a4-gemm.cuh) at prefill widths.
++// give identical outputs. On NVIDIA GPUs with INT4 tensor cores the GEMM is rq-w4a4-tc.cuh at every width; elsewhere
++// the skinny kernel (rq-w4a4-skinny.cuh) at verify widths and the tiled one (rq-w4a4-gemm.cuh) at prefill widths.
 +
 +// same factorization as ggml_rq_hadamard_factor (ggml-quants.c)
 +static bool rq_factor(int64_t n, int & p, int & m) {
@@ -1140,7 +1822,22 @@ index 0000000..9c11a85
 +    float   clip; // block 0 header pad[1]; 0 = unset
 +    int32_t rot;  // block 0 header pad[0]: W4A4H's Hadamard length (the row, or a block of it)
 +    bool    wg64; // weight multipliers per 64 inputs (block 0 header sum, RQ_W_MULT_G): activation groups of 64 only
++    bool    tc;   // repacked for the INT4 tensor cores (rq-w4a4-tc.cuh) instead of the skinny layout
 +};
++
++// INT4 tensor cores: NVIDIA Turing, Ampere and Ada, activation groups of 64 (one MMA per group); env RQ_TC=0 keeps the
++// dot8-shaped kernels (emulated dot8 on CUDA)
++static bool rq_tc_ok(const ggml_tensor * src0) {
++#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
++    GGML_UNUSED(src0);
++    return false;
++#else
++    static const bool env_on = !getenv("RQ_TC") || atoi(getenv("RQ_TC")) != 0;
++    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
++    GGML_UNUSED(src0); // N is a multiple of RQ_WAVE (ggml_cuda_rq_w4a4_supported), so of the 16-channel tile
++    return env_on && GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= RQ_TC_MIN_CC && cc < RQ_TC_MAX_CC && ggml_rq_act_group() == 64;
++#endif
++}
 +
 +static __global__ void rq_repack_kernel(const uint8_t * __restrict__ src, int32_t * __restrict__ wt, float * __restrict__ sw,
 +                                        int N, int K) {
@@ -1339,7 +2036,7 @@ index 0000000..9c11a85
 +        const int32_t rot = src0->type == GGML_TYPE_W4A4H ? (int32_t) ggml_rq_rot_check(hdr[1], src0->ne[0]) : 0;
 +        const bool wg64 = ((uint32_t) hdr[0] >> 29) == 3u;
 +        GGML_ASSERT(!wg64 || ggml_rq_act_group() == 64); // the fold takes one weight multiplier per activation group
-+        info = new rq_tensor_info{ false, tclip, rot, wg64 };
++        info = new rq_tensor_info{ false, tclip, rot, wg64, rq_tc_ok(src0) };
 +        const_cast<ggml_tensor *>(src0)->extra = info;
 +    }
 +    return info;
@@ -1357,6 +2054,15 @@ index 0000000..9c11a85
 +    ggml_cuda_pool_alloc<uint8_t> tmp(ctx.pool(), nbytes);
 +    CUDA_CHECK(cudaMemcpyAsync(tmp.get(), base, nbytes, cudaMemcpyDeviceToDevice, ctx.stream()));
 +    const int64_t n_threads = N * Kw;
++    if (info->tc) { // [codes in fragment order | s_w | ck]
++        rq_tc_repack_kernel<<<(n_threads + 255) / 256, 256, 0, ctx.stream()>>>(tmp.get(), (int32_t *) base, (float *) (base + N * K / 2),
++                                                                             (int) N, (int) K);
++        const int64_t n_ck = (N / 16) * (K / 64) * 8;
++        rq_tc_ck_kernel<<<(n_ck + 255) / 256, 256, 0, ctx.stream()>>>(tmp.get(), (uint32_t *) (base + N * K / 2 + N * 4), (int) N, (int) K);
++        CUDA_CHECK(cudaGetLastError());
++        info->repacked = true;
++        return;
++    }
 +    rq_repack_kernel<<<(n_threads + 255) / 256, 256, 0, ctx.stream()>>>(tmp.get(), (int32_t *) base, (float *) (base + N * K / 2),
 +                                                                      (int) N, (int) K);
 +    const int G = ggml_rq_act_group();
@@ -1366,6 +2072,72 @@ index 0000000..9c11a85
 +    rq_wk_kernel<<<(n_wk + 255) / 256, 256, 0, ctx.stream()>>>(tmp.get(), (int8_t *) (base + N * K / 2 + N * 4 + n_sums * 2), (int) N, (int) K);
 +    CUDA_CHECK(cudaGetLastError());
 +    info->repacked = true;
++}
++
++// INT4 tensor-core path (rq-w4a4-tc.cuh): quantize the M x K activation (already rotated for W4A4H) once, token-major,
++// then one launch per weight. Up to 64 tokens a warp holds one channel tile and every token (decode, verify); wider, a
++// block of 8 warps holds 128 channels x 64 tokens. K is split while the grid has fewer warps than the GPU can hold.
++template <int MT, int NT, int WN, int WT>
++static void rq_tc_launch(ggml_backend_cuda_context & ctx, const ggml_tensor * const * src0s, ggml_tensor * const * dsts, int n,
++                         const float * x, int ldx, int64_t K, int64_t M, float clip) {
++    cudaStream_t stream = ctx.stream();
++    constexpr int BT = 8 * NT * WT, BN = 16 * MT * WN;
++    const int64_t Mp = (M + BT - 1) / BT * BT;
++    const int Kw = (int) (K / 8), ng = (int) (K / 64);
++    const int nsm = ggml_cuda_info().devices[ggml_cuda_get_device()].nsm;
++    std::vector<int> gz(n), nz(n);
++    size_t n_acc = 0, n_cnt = 0;
++    for (int i = 0; i < n; ++i) {
++        const int64_t blocks = (src0s[i]->ne[1] + BN - 1) / BN * (Mp / BT);
++        // split K until the grid could fill every SM with warps (48 on Ampere), keeping 4+ groups per split (one token,
++        // 17408 x 5120 on the 3090: 67-72 us for 1 to 8 splits; 512 tokens: splits only cost)
++        static const int env_split = getenv("RQ_TC_SPLIT") ? atoi(getenv("RQ_TC_SPLIT")) : 0;
++        int s = 1;
++        while (env_split == 0 && blocks * s * WN * WT < 48 * nsm && ng / (2 * s) >= 4) s *= 2;
++        if (env_split > 0) s = env_split;
++        gz[i] = (ng + s - 1) / s;
++        nz[i] = (ng + gz[i] - 1) / gz[i];
++        if (nz[i] > 1) {
++            n_acc += Mp * src0s[i]->ne[1];
++            n_cnt += blocks;
++        }
++    }
++    const int G = ggml_rq_act_group();
++    ggml_cuda_pool_alloc<int32_t> aq(ctx.pool(), Mp * Kw);
++    ggml_cuda_pool_alloc<float>   sa(ctx.pool(), Mp);
++    ggml_cuda_pool_alloc<int32_t> mul(ctx.pool(), Mp * (K / G));
++    ggml_cuda_pool_alloc<int32_t> acc(ctx.pool(), std::max<size_t>(n_acc + n_cnt, 1)); // split-K sums, then counters
++    const int zero_blocks = (int) ((n_acc + n_cnt + RQ_QUANT_THREADS * 16 - 1) / (RQ_QUANT_THREADS * 16));
++    rq_quantize_act_kernel<<<M + zero_blocks, RQ_QUANT_THREADS, 0, stream>>>(x, ldx, (int) K, G, clip, aq.get(), sa.get(), mul.get(),
++                                                                            (int) Mp, 0, acc.get(), (int64_t) (n_acc + n_cnt), (int) M);
++    int32_t * acc_i = acc.get(), * cnt_i = acc.get() + n_acc;
++    for (int i = 0; i < n; ++i) {
++        const int64_t Ni = src0s[i]->ne[1];
++        const uint8_t * base = (const uint8_t *) src0s[i]->data;
++        const dim3 grid((Ni + BN - 1) / BN, Mp / BT, nz[i]);
++        rq_tc_kernel<MT, NT, WN, WT><<<grid, 32 * WN * WT, 0, stream>>>(
++            aq.get(), mul.get(), sa.get(), (const int4 *) base, (const float *) (base + Ni * K / 2),
++            (const uint32_t *) (base + Ni * K / 2 + Ni * 4), (float *) dsts[i]->data, (int) (dsts[i]->nb[1] / sizeof(float)),
++            (int) Ni, (int) M, (int) Mp, Kw, gz[i], acc_i, cnt_i);
++        if (nz[i] > 1) {
++            acc_i += Mp * Ni;
++            cnt_i += grid.x * grid.y;
++        }
++    }
++    CUDA_CHECK(cudaGetLastError());
++}
++
++static void rq_mul_mat_tc(ggml_backend_cuda_context & ctx, const ggml_tensor * const * src0s, ggml_tensor * const * dsts, int n,
++                          const float * x, int ldx, int64_t K, int64_t M, float clip) {
++    for (int i = 0; i < n; ++i) {
++        rq_repack_once(ctx, src0s[i], rq_info(src0s[i], ctx.stream()));
++    }
++    if      (M <= 8)  rq_tc_launch<1, 1, 4, 1>(ctx, src0s, dsts, n, x, ldx, K, M, clip);
++    else if (M <= 16) rq_tc_launch<1, 2, 4, 1>(ctx, src0s, dsts, n, x, ldx, K, M, clip);
++    else if (M <= 24) rq_tc_launch<1, 3, 4, 1>(ctx, src0s, dsts, n, x, ldx, K, M, clip);
++    else if (M <= 32) rq_tc_launch<1, 4, 4, 1>(ctx, src0s, dsts, n, x, ldx, K, M, clip);
++    else if (M <= 64) rq_tc_launch<1, 8, 4, 1>(ctx, src0s, dsts, n, x, ldx, K, M, clip);
++    else              rq_tc_launch<2, 4, 4, 2>(ctx, src0s, dsts, n, x, ldx, K, M, clip);
 +}
 +
 +// dsts[i] = src0s[i] x src1 for n <= 3 weights of one type, K and clip (see ggml_cuda_rq_w4a4_can_fuse): one
@@ -1387,7 +2159,8 @@ index 0000000..9c11a85
 +    static const int chunk = getenv("RQ_CHUNK") ? rq_skinny_tp(atoi(getenv("RQ_CHUNK"))) : 24;
 +    rq_act_cache * cache = nullptr; // set for one-chunk skinny calls, which share their quantized activation
 +    bool hit = false;
-+    if (rq_use_skinny(src0) && M <= chunk && K / 8 <= RQ_CACHE_KW) {
++    const bool tc = info->tc;
++    if (!tc && rq_use_skinny(src0) && M <= chunk && K / 8 <= RQ_CACHE_KW) {
 +        cache = &rq_cache_for(ctx);
 +        hit = cache->entry_gen == cache->gen && cache->src1 == src1 && cache->data == src1->data &&
 +              cache->type == src0->type && cache->clip == clip && cache->rot == n_rot && cache->K == K && cache->M == M;
@@ -1426,6 +2199,11 @@ index 0000000..9c11a85
 +        }
 +        x = xp.get() != nullptr ? xp.get() : xh.get();
 +        ldx = (int) K;
++    }
++
++    if (tc) {
++        rq_mul_mat_tc(ctx, src0s, dsts, n, x, ldx, K, M, clip);
++        return;
 +    }
 +
 +    if (rq_use_skinny(src0)) {
@@ -2158,7 +2936,7 @@ index 43eb46e..8eb7362 100644
      // by doing so, the number of splits in the graph is reduced
      // expand k later to enable rope fusion which directly writes into k-v cache
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index e4ebd7c..ca8451c 100644
+index e4ebd7c..dd69cb0 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
 @@ -5414,6 +5414,9 @@ struct test_mul_mat : public test_case {
@@ -2223,7 +3001,23 @@ index e4ebd7c..ca8451c 100644
      bool run_whole_graph() override { return o > 1; }
  
      std::string op_desc(ggml_tensor * t) override {
-@@ -11196,6 +11244,25 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -8765,6 +8813,15 @@ struct test_flash_attn_ext : public test_case {
+     }
+ };
+ 
++// the ruquant q4_0 attention at the 27B's shapes (rq-fattn.cu): it quantizes Q to int4 by default, and against the CPU,
++// which takes Q as q8_0, its output is 4-5.5e-4 NMSE
++struct test_flash_attn_ext_rq_q4 : public test_flash_attn_ext {
++    using test_flash_attn_ext::test_flash_attn_ext;
++    double max_nmse_err() override {
++        return 1e-3;
++    }
++};
++
+ // large Q values, so the online softmax has to rescale the partial results
+ struct test_flash_attn_ext_large_logits : public test_flash_attn_ext {
+     static constexpr int q_range = 20;
+@@ -11196,6 +11253,35 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8192, 512, 5120, {128, 1}, {1, 1}));
  #endif
  
@@ -2244,8 +3038,226 @@ index e4ebd7c..ca8451c 100644
 +        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 192, 8, 5120, {1, 1}, {1, 1}));
 +        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 1024, 8, 5120, {1, 1}, {1, 1}));
 +        test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 5120, 8, 17408, {1, 1}, {1, 1}));
++        // ruquant q4_0 KV attention (rq-fattn.cu; INT4 tensor cores on NVIDIA, v_dot8 on gfx906): head size 256, 6
++        // query heads per KV head, decode and verify widths
++        if (type_a == GGML_TYPE_W4A4) {
++            for (int64_t nb : {1, 2, 8, 16}) {
++                for (int64_t kv : {256, 4096}) {
++                    test_cases.emplace_back(new test_flash_attn_ext_rq_q4(256, 256, 4, {6, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32,
++                                                                          GGML_TYPE_Q4_0, GGML_TYPE_Q4_0));
++                }
++            }
++        }
 +    }
 +
      for (ggml_type type_a : all_types) {
          for (int i = 1; i < 10; ++i) {
              test_cases.emplace_back(new test_mul_mat(type_a,    GGML_TYPE_F32, 16,  i, 1*256, { 1,  1}, {1, 1}));
+@@ -12624,6 +12710,22 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+     std::vector<std::unique_ptr<test_case>> test_cases;
+ 
++    // ruquant q4_0 KV attention at 64k context, decode and verify widths, and the f16 cache for comparison
++    for (ggml_type kv_type : {GGML_TYPE_Q4_0, GGML_TYPE_F16}) {
++        for (int64_t nb : {1, 8}) {
++            test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 65536, nb, true, false, 0, 0, GGML_PREC_F32,
++                                                            kv_type, kv_type));
++        }
++    }
++    // ruquant W4A4: the 27B's shapes (gate / up, down, q) at decode, verify and prefill widths
++    for (ggml_type type_a : {GGML_TYPE_W4A4, GGML_TYPE_W4A4H}) {
++        for (int n : {1, 8, 16, 512}) {
++            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 17408, n, 5120, {1, 1}, {1, 1}));
++            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 5120, n, 17408, {1, 1}, {1, 1}));
++            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 6144, n, 5120, {1, 1}, {1, 1}));
++        }
++    }
++
+     // delta-net conv input: conv state followed by the transposed qkv of the ubatch
+     test_cases.emplace_back(new test_concat(GGML_TYPE_F32, {3, 8192, 1, 1}, 512, 0, 16));
+ 
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 9377e3c..57d0d53 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -1013,6 +1013,96 @@ static bool add_mtmd_chunk(const server_slot & slot, const mtmd_input_chunk * ch
+ // server_context_impl (private implementation)
+ //
+ 
++// ruquant: the model's own tokens for text a client sends back unchanged. A model can sample a valid but
++// non-canonical tokenization (a word as two tokens where the tokenizer makes one); the client returns the same text,
++// the server tokenizes it canonically, and the token match with the cache ends there. With recurrent layers (Qwen3.5's
++// DeltaNet) the state cannot be rewound, so the server re-processed everything after that point: 16k tokens after a
++// long answer, measured with opencode. Where the cached tokens and the new prompt spell the same bytes up to a common
++// token boundary (within 64 tokens of a mismatch), the new prompt takes the cached tokens for that span; a real
++// change of the text stops the walk. Prompts with media are left alone. LLAMA_TEXT_MATCH=0 turns it off.
++static bool rq_adopt_cached_tokens(const llama_context * ctx, const server_tokens & cached, server_tokens & incoming) {
++    const llama_tokens & a = cached.get_tokens();
++    const llama_tokens & b = incoming.get_tokens();
++    for (const llama_token t : a) {
++        if (t == LLAMA_TOKEN_NULL) {
++            return false;
++        }
++    }
++    for (const llama_token t : b) {
++        if (t == LLAMA_TOKEN_NULL) {
++            return false;
++        }
++    }
++    auto piece = [&](llama_token t) { return common_token_to_piece(ctx, t, true); };
++    llama_tokens out;
++    size_t i = 0, j = 0;
++    bool changed = false;
++    while (true) {
++        while (i < a.size() && j < b.size() && a[i] == b[j]) {
++            out.push_back(b[j]);
++            i++;
++            j++;
++        }
++        if (i >= a.size() || j >= b.size()) {
++            break;
++        }
++        // the shorter text takes the next token until both end at the same byte with the same bytes
++        std::string ta, tb;
++        size_t ii = i, jj = j;
++        bool aligned = false;
++        while (ii - i < 64 && jj - j < 64) {
++            if ((ta.size() <= tb.size() && ii < a.size()) || jj >= b.size()) {
++                if (ii >= a.size()) {
++                    break;
++                }
++                ta += piece(a[ii++]);
++            } else {
++                tb += piece(b[jj++]);
++            }
++            const size_t m = std::min(ta.size(), tb.size());
++            if (ta.compare(0, m, tb, 0, m) != 0) {
++                break;
++            }
++            if (ta.size() == tb.size()) {
++                aligned = true;
++                break;
++            }
++        }
++        if (!aligned) {
++            break;
++        }
++        out.insert(out.end(), a.begin() + i, a.begin() + ii);
++        i = ii;
++        j = jj;
++        changed = true;
++    }
++    if (!changed) {
++        return false;
++    }
++    out.insert(out.end(), b.begin() + j, b.end());
++    incoming = server_tokens(out, incoming.has_mtmd);
++    return true;
++}
++
++// ruquant diagnostics: LLAMA_DUMP_DIR=dir writes every chat prompt as rendered (NNNN-prompt.txt) and every raw answer
++// (NNNN-answer.txt, reasoning and tool call markup included), numbered in arrival order, so that a conversation's
++// prompt N + 1 can be compared with prompt N + answer N: where they differ is where the server's cache match ends
++static void rq_dump(const char * kind, const std::string & text) {
++    static const char * dir = getenv("LLAMA_DUMP_DIR");
++    if (dir == nullptr) {
++        return;
++    }
++    static std::atomic<int> n_prompt{0}, n_answer{0};
++    const int n = (strcmp(kind, "prompt") == 0 ? n_prompt : n_answer).fetch_add(1) + 1;
++    char name[64];
++    snprintf(name, sizeof(name), "/%04d-%s.txt", n, kind);
++    FILE * f = fopen((std::string(dir) + name).c_str(), "wb");
++    if (f) {
++        fwrite(text.data(), 1, text.size(), f);
++        fclose(f);
++    }
++}
++
+ struct server_context_impl {
+     friend struct server_context;
+ 
+@@ -2402,6 +2492,9 @@ private:
+ 
+     void send_final_response(server_slot & slot) {
+         auto res = std::make_unique<server_task_result_cmpl_final>();
++        if (slot.task->params.res_type != TASK_RESPONSE_TYPE_NONE) {
++            rq_dump("answer", slot.generated.text);
++        }
+ 
+         res->id      = slot.task->id;
+         res->id_slot = slot.id;
+@@ -2721,6 +2814,37 @@ private:
+     }
+ 
+     // n_tokens_cur: the number of tokens added to the batch for the current slot
++    // ruquant: a context checkpoint every LLAMA_GEN_CKPT_STEP generated tokens (default 4096, 0 = off). A client that
++    // sends a long answer back changed then rolls back to the last of these instead of to the start of the answer: with
++    // recurrent layers (Qwen3.5's DeltaNet) the state cannot be rewound, so the server re-processed the whole answer
++    // (one character changed at 85% of an 11.7k-token answer, TP2 on MI50s: 11754 tokens in 18.8 s, with checkpoints
++    // every 2048: 1499 in 3.1 s). Text the client returns unchanged in another tokenization is handled by
++    // rq_adopt_cached_tokens. Cost at 2048: none on a 3090, 0.3% of decode at TP2, 0.75% at TP4 (the state is gathered
++    // from every GPU). Taken before the step's draft, when the target holds exactly the slot's tokens; the usual
++    // eviction (n_ctx_checkpoints, checkpoint_min_step) thins them out once the task is done.
++    void maybe_create_gen_checkpoint(server_slot & slot) {
++        static const int64_t step = getenv("LLAMA_GEN_CKPT_STEP") ? atoll(getenv("LLAMA_GEN_CKPT_STEP")) : 4096;
++        if (step <= 0 || params_base.n_ctx_checkpoints <= 0 || !slot.task ||
++            slot.task->type != SERVER_TASK_TYPE_COMPLETION || !slot.spec_draft.empty()) {
++            return;
++        }
++        const int64_t n_cur = slot.prompt.n_tokens();
++        const int64_t last  = slot.prompt.checkpoints.empty() ? 0 : slot.prompt.checkpoints.back().n_tokens;
++        if (n_cur < last + step) {
++            return;
++        }
++        // not with images in the prompt: prompt checkpoints skip media chunks too (positions are not token counts)
++        if (slot.prompt.tokens.find_next_media_chunk(0).first != nullptr || slot.prompt.tokens[0] == LLAMA_TOKEN_NULL) {
++            return;
++        }
++        const llama_pos pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
++        const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
++        if (pos_min < 0) {
++            return;
++        }
++        create_checkpoint(slot, 0, pos_min, pos_max);
++    }
++
+     void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max) {
+         const int id_task = slot.task->id;
+ 
+@@ -3854,6 +3978,7 @@ private:
+             }
+ 
+             generating.push_back(&slot);
++            maybe_create_gen_checkpoint(slot);
+ 
+             if (spec) {
+                 common_speculative_get_draft_params(spec.get(), slot.id).drafting = false;
+@@ -4006,6 +4131,16 @@ private:
+ 
+                 // this slot still has a prompt to be processed
+                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
++                    // once per task, on the main loop that owns the slot, before anything reads the prompt's length
++                    static const bool text_match = !getenv("LLAMA_TEXT_MATCH") || atoi(getenv("LLAMA_TEXT_MATCH")) != 0;
++                    if (text_match && slot.state == SLOT_STATE_STARTED && slot.task->params.cache_prompt && !slot.task->is_stateless() &&
++                        slot.task->n_tokens_shared == 0 && !slot.prompt.tokens.empty()) {
++                        const size_t n_before = slot.prompt.tokens.get_common_prefix(slot.task->tokens);
++                        if (rq_adopt_cached_tokens(ctx_tgt, slot.prompt.tokens, const_cast<server_tokens &>(slot.task->tokens))) {
++                            SLT_INF(slot, "prompt repeats cached text in another tokenization: cache match %zu -> %zu tokens\n",
++                                    n_before, slot.prompt.tokens.get_common_prefix(slot.task->tokens));
++                        }
++                    }
+                     const auto & input_tokens = slot.task->tokens;
+ 
+                     // used to determine the number of tokens added to the batch for the current slot
+@@ -5337,6 +5472,10 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
+             }
+         }
+ 
++        if (res_type != TASK_RESPONSE_TYPE_NONE && prompt.is_string()) {
++            rq_dump("prompt", prompt.get<std::string>());
++        }
++
+         // process prompt
+         std::vector<server_tokens> inputs;
+ 

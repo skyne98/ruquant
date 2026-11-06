@@ -1,0 +1,1 @@
+{"hidden": "node --test test/hidden.test.js test/orig.test.js", "suite": "node --test"}

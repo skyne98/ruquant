@@ -1,0 +1,998 @@
+[
+ {
+  "run": "js-csv-r1",
+  "task": "js-csv",
+  "hidden": {
+   "passed": 16,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "suite": {
+   "passed": 22,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 220.1,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 23527,
+   "output": 16498,
+   "reasoning": 0,
+   "cache": {
+    "read": 225693,
+    "write": 0
+   }
+  },
+  "steps": 14,
+  "tools": {
+   "read": 5,
+   "shell": 10,
+   "write": 1,
+   "edit": 1
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [],
+  "reasoning_chars": 41888,
+  "text_chars": 3482,
+  "server": {
+   "requests": 14,
+   "max_ctx": 27722,
+   "acceptance": 0.343,
+   "prompt_tokens": 23527,
+   "prompt_s": 20.9,
+   "gen_tokens": 40025,
+   "gen_s": 218.2
+  }
+ },
+ {
+  "run": "js-csv-r2",
+  "task": "js-csv",
+  "hidden": {
+   "passed": 16,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "suite": {
+   "passed": 20,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 218.1,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 16752,
+   "output": 18736,
+   "reasoning": 0,
+   "cache": {
+    "read": 270441,
+    "write": 0
+   }
+  },
+  "steps": 14,
+  "tools": {
+   "read": 6,
+   "shell": 8,
+   "edit": 5
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [],
+  "reasoning_chars": 47380,
+  "text_chars": 3229,
+  "server": {
+   "requests": 14,
+   "max_ctx": 32137,
+   "acceptance": 0.383,
+   "prompt_tokens": 16752,
+   "prompt_s": 15.9,
+   "gen_tokens": 35488,
+   "gen_s": 214.8
+  }
+ },
+ {
+  "run": "md-session-r1",
+  "task": "md-session",
+  "hidden": {
+   "passed": 21,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "suite": {
+   "passed": 95,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "turn_status": [
+   "ok",
+   "ok",
+   "ok",
+   "ok"
+  ],
+  "seconds": 1386.5,
+  "stage_hidden": [
+   {
+    "passed": 6,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   },
+   {
+    "passed": 11,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   },
+   {
+    "passed": 16,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   },
+   {
+    "passed": 21,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.2
+   }
+  ],
+  "tokens": {
+   "input": 51226,
+   "output": 120195,
+   "reasoning": 0,
+   "cache": {
+    "read": 1293826,
+    "write": 0
+   }
+  },
+  "steps": 40,
+  "tools": {
+   "write": 9,
+   "shell": 8,
+   "read": 9,
+   "edit": 13,
+   "grep": 1
+  },
+  "tool_errors": [
+   "edit: {\"type\": \"tool.execution\", \"message\": \"Could not find oldString in mdlite/__init__.py. It must match exactly, including whitespace and indentation.\\n\\nThe closest lines in the file:\\n184: def to_html(text: str) -> str:\\n185:     \\\"\\\"\\\"Convert a Markdown string to HTML.\\n186: \\n187:     Blank lines s"
+  ],
+  "arg_errors": [],
+  "cutoffs": 2,
+  "flags": [],
+  "reasoning_chars": 349672,
+  "text_chars": 9705,
+  "server": {
+   "requests": 42,
+   "max_ctx": 61354,
+   "acceptance": 0.397,
+   "prompt_tokens": 51226,
+   "prompt_s": 51.9,
+   "gen_tokens": 171421,
+   "gen_s": 1376.1
+  }
+ },
+ {
+  "run": "md-session-r2",
+  "task": "md-session",
+  "hidden": {
+   "passed": 21,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "suite": {
+   "passed": 101,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.3
+  },
+  "turn_status": [
+   "ok",
+   "ok",
+   "ok",
+   "ok"
+  ],
+  "seconds": 1327.7,
+  "stage_hidden": [
+   {
+    "passed": 6,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   },
+   {
+    "passed": 11,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   },
+   {
+    "passed": 16,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   },
+   {
+    "passed": 21,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.2
+   }
+  ],
+  "tokens": {
+   "input": 32892,
+   "output": 115922,
+   "reasoning": 0,
+   "cache": {
+    "read": 1542331,
+    "write": 0
+   }
+  },
+  "steps": 54,
+  "tools": {
+   "read": 14,
+   "shell": 17,
+   "write": 7,
+   "edit": 20
+  },
+  "tool_errors": [
+   "edit: {\"type\": \"tool.execution\", \"message\": \"File not found: /tmp/claude-1000/-home-fox-Experiments-ruquant/513d0071-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/q4tc/md-session-r2/work/mdlite/core.py\"}",
+   "shell: {\"type\": \"unknown\", \"message\": \"Portable shell scanner cannot analyze command: command-substitution\"}"
+  ],
+  "arg_errors": [],
+  "cutoffs": 3,
+  "flags": [
+   [
+    "reasoning",
+    "loop: paragraph x5: 'def flush_paragraph() -> None:\\n        if paragraph:\\n            joined = \" \".jo'"
+   ]
+  ],
+  "reasoning_chars": 322060,
+  "text_chars": 8995,
+  "server": {
+   "requests": 56,
+   "max_ctx": 54850,
+   "acceptance": 0.37,
+   "prompt_tokens": 32892,
+   "prompt_s": 35.8,
+   "gen_tokens": 148814,
+   "gen_s": 1315.7
+  }
+ },
+ {
+  "run": "mit-windowed-r1",
+  "task": "mit-windowed",
+  "hidden": {
+   "passed": 834,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 7.5
+  },
+  "suite": {
+   "passed": 722,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 7.1
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 390.8,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 32065,
+   "output": 34130,
+   "reasoning": 0,
+   "cache": {
+    "read": 760617,
+    "write": 0
+   }
+  },
+  "steps": 31,
+  "tools": {
+   "shell": 21,
+   "grep": 2,
+   "read": 4,
+   "webfetch": 1,
+   "execute": 2,
+   "edit": 3,
+   "write": 1
+  },
+  "tool_errors": [
+   "edit: {\"type\": \"tool.execution\", \"message\": \"Could not find oldString in /tmp/claude-1000/-home-fox-Experiments-ruquant/513d0c71-c116-4be6-843f-ae1985d3b221/scratchpad/agentic/runs/q4tc/mit-windowed-r1/work/more_itertools/more.py. It must match exactly, including whitespace and indentation.\"}"
+  ],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [],
+  "reasoning_chars": 77766,
+  "text_chars": 4336,
+  "server": {
+   "requests": 32,
+   "max_ctx": 52157,
+   "acceptance": 0.444,
+   "prompt_tokens": 32065,
+   "prompt_s": 34.1,
+   "gen_tokens": 66195,
+   "gen_s": 375.2
+  }
+ },
+ {
+  "run": "mit-windowed-r2",
+  "task": "mit-windowed",
+  "hidden": {
+   "passed": 834,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 7.4
+  },
+  "suite": {
+   "passed": 724,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 7.0
+  },
+  "turn_status": [
+   "exit 1"
+  ],
+  "seconds": 341.5,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 27850,
+   "output": 31385,
+   "reasoning": 0,
+   "cache": {
+    "read": 369500,
+    "write": 0
+   }
+  },
+  "steps": 19,
+  "tools": {
+   "shell": 7,
+   "glob": 1,
+   "grep": 2,
+   "read": 5,
+   "webfetch": 4,
+   "websearch": 1,
+   "edit": 2
+  },
+  "tool_errors": [
+   "webfetch: {\"type\": \"unknown\", \"message\": \"StatusCode: non 2xx status code (404 GET https://raw.githubusercontent.com/more-itertools/more-itertools/main/more_itertools/more.py)\"}",
+   "webfetch: {\"type\": \"unknown\", \"message\": \"StatusCode: non 2xx status code (404 GET https://raw.githubusercontent.com/more-itertools/more-itertools/main/more_itertools/more.py)\"}",
+   "websearch: {\"type\": \"unknown\", \"message\": \"Web search cancelled\"}"
+  ],
+  "arg_errors": [],
+  "cutoffs": 1,
+  "flags": [
+   [
+    "reasoning",
+    "loop: paragraph x7: '# Deal with the first window not being full\\n    if not window:\\n        return\\n  '"
+   ]
+  ],
+  "reasoning_chars": 62154,
+  "text_chars": 1862,
+  "server": {
+   "requests": 20,
+   "max_ctx": 57553,
+   "acceptance": 0.47,
+   "prompt_tokens": 27850,
+   "prompt_s": 27.5,
+   "gen_tokens": 59235,
+   "gen_s": 317.7
+  }
+ },
+ {
+  "run": "py-notes-feature-r1",
+  "task": "py-notes-feature",
+  "hidden": {
+   "passed": 10,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "suite": {
+   "passed": 10,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 103.7,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 5352,
+   "output": 12003,
+   "reasoning": 0,
+   "cache": {
+    "read": 170880,
+    "write": 0
+   }
+  },
+  "steps": 11,
+  "tools": {
+   "read": 7,
+   "glob": 1,
+   "edit": 12,
+   "shell": 4
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [],
+  "reasoning_chars": 18004,
+  "text_chars": 1955,
+  "server": {
+   "requests": 11,
+   "max_ctx": 22157,
+   "acceptance": 0.588,
+   "prompt_tokens": 5352,
+   "prompt_s": 6.1,
+   "gen_tokens": 17355,
+   "gen_s": 100.8
+  }
+ },
+ {
+  "run": "py-notes-feature-r2",
+  "task": "py-notes-feature",
+  "hidden": {
+   "passed": 10,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "suite": {
+   "passed": 9,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 73.0,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 3857,
+   "output": 8256,
+   "reasoning": 0,
+   "cache": {
+    "read": 134666,
+    "write": 0
+   }
+  },
+  "steps": 11,
+  "tools": {
+   "shell": 3,
+   "read": 5,
+   "edit": 6
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [],
+  "reasoning_chars": 17514,
+  "text_chars": 1677,
+  "server": {
+   "requests": 11,
+   "max_ctx": 17142,
+   "acceptance": 0.539,
+   "prompt_tokens": 3857,
+   "prompt_s": 4.6,
+   "gen_tokens": 12113,
+   "gen_s": 70.9
+  }
+ },
+ {
+  "run": "py-orders-bug-r1",
+  "task": "py-orders-bug",
+  "hidden": {
+   "passed": 11,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "suite": {
+   "passed": 8,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 99.9,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 5229,
+   "output": 9493,
+   "reasoning": 0,
+   "cache": {
+    "read": 153927,
+    "write": 0
+   }
+  },
+  "steps": 12,
+  "tools": {
+   "read": 9,
+   "shell": 5,
+   "grep": 1,
+   "edit": 3
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [],
+  "reasoning_chars": 18492,
+  "text_chars": 2219,
+  "server": {
+   "requests": 12,
+   "max_ctx": 19604,
+   "acceptance": 0.45,
+   "prompt_tokens": 5229,
+   "prompt_s": 6.1,
+   "gen_tokens": 14722,
+   "gen_s": 97.6
+  }
+ },
+ {
+  "run": "py-orders-bug-r2",
+  "task": "py-orders-bug",
+  "hidden": {
+   "passed": 11,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "suite": {
+   "passed": 8,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 79.1,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 4078,
+   "output": 7462,
+   "reasoning": 0,
+   "cache": {
+    "read": 114162,
+    "write": 0
+   }
+  },
+  "steps": 10,
+  "tools": {
+   "shell": 5,
+   "read": 6,
+   "edit": 3
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [],
+  "reasoning_chars": 17124,
+  "text_chars": 2995,
+  "server": {
+   "requests": 10,
+   "max_ctx": 16568,
+   "acceptance": 0.422,
+   "prompt_tokens": 4078,
+   "prompt_s": 4.7,
+   "gen_tokens": 11540,
+   "gen_s": 77.0
+  }
+ },
+ {
+  "run": "py-refactor-r1",
+  "task": "py-refactor",
+  "hidden": {
+   "passed": 8,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "suite": {
+   "passed": 14,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 58.7,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 5357,
+   "output": 6412,
+   "reasoning": 0,
+   "cache": {
+    "read": 147363,
+    "write": 0
+   }
+  },
+  "steps": 13,
+  "tools": {
+   "shell": 4,
+   "read": 11,
+   "edit": 14
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [],
+  "reasoning_chars": 10854,
+  "text_chars": 2518,
+  "server": {
+   "requests": 13,
+   "max_ctx": 16657,
+   "acceptance": 0.59,
+   "prompt_tokens": 5357,
+   "prompt_s": 6.3,
+   "gen_tokens": 11769,
+   "gen_s": 56.3
+  }
+ },
+ {
+  "run": "py-refactor-r2",
+  "task": "py-refactor",
+  "hidden": {
+   "passed": 8,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "suite": {
+   "passed": 15,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.1
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 77.7,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 7290,
+   "output": 8917,
+   "reasoning": 0,
+   "cache": {
+    "read": 103264,
+    "write": 0
+   }
+  },
+  "steps": 8,
+  "tools": {
+   "read": 12,
+   "glob": 1,
+   "grep": 2,
+   "edit": 12,
+   "write": 1,
+   "shell": 1
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [],
+  "reasoning_chars": 13141,
+  "text_chars": 2543,
+  "server": {
+   "requests": 8,
+   "max_ctx": 21239,
+   "acceptance": 0.576,
+   "prompt_tokens": 7290,
+   "prompt_s": 6.7,
+   "gen_tokens": 16207,
+   "gen_s": 75.1
+  }
+ },
+ {
+  "run": "rust-expr-r1",
+  "task": "rust-expr",
+  "hidden": {
+   "passed": 7,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "suite": {
+   "passed": 18,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.0
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 511.2,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 19813,
+   "output": 48366,
+   "reasoning": 0,
+   "cache": {
+    "read": 605302,
+    "write": 0
+   }
+  },
+  "steps": 23,
+  "tools": {
+   "read": 8,
+   "glob": 1,
+   "write": 2,
+   "edit": 18,
+   "shell": 5
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 1,
+  "flags": [],
+  "reasoning_chars": 99207,
+  "text_chars": 2956,
+  "server": {
+   "requests": 24,
+   "max_ctx": 53529,
+   "acceptance": 0.423,
+   "prompt_tokens": 19813,
+   "prompt_s": 20.9,
+   "gen_tokens": 68179,
+   "gen_s": 504.8
+  }
+ },
+ {
+  "run": "rust-expr-r2",
+  "task": "rust-expr",
+  "hidden": {
+   "passed": 7,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.2
+  },
+  "suite": {
+   "passed": 15,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.0
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 376.1,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 4646,
+   "output": 37470,
+   "reasoning": 0,
+   "cache": {
+    "read": 619627,
+    "write": 0
+   }
+  },
+  "steps": 19,
+  "tools": {
+   "read": 5,
+   "shell": 7,
+   "write": 2,
+   "edit": 14
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 1,
+  "flags": [],
+  "reasoning_chars": 78171,
+  "text_chars": 2667,
+  "server": {
+   "requests": 19,
+   "max_ctx": 47135,
+   "acceptance": 0.467,
+   "prompt_tokens": 4646,
+   "prompt_s": 7.1,
+   "gen_tokens": 42116,
+   "gen_s": 352.5
+  }
+ },
+ {
+  "run": "rust-lru-r1",
+  "task": "rust-lru",
+  "hidden": {
+   "passed": 11,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.3
+  },
+  "suite": {
+   "passed": 19,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.0
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 313.2,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 5236,
+   "output": 31273,
+   "reasoning": 0,
+   "cache": {
+    "read": 382800,
+    "write": 0
+   }
+  },
+  "steps": 15,
+  "tools": {
+   "read": 6,
+   "write": 1,
+   "edit": 7,
+   "shell": 4
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 1,
+  "flags": [],
+  "reasoning_chars": 73966,
+  "text_chars": 2091,
+  "server": {
+   "requests": 15,
+   "max_ctx": 41308,
+   "acceptance": 0.433,
+   "prompt_tokens": 5236,
+   "prompt_s": 6.8,
+   "gen_tokens": 36509,
+   "gen_s": 310.1
+  }
+ },
+ {
+  "run": "rust-lru-r2",
+  "task": "rust-lru",
+  "hidden": {
+   "passed": 11,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.3
+  },
+  "suite": {
+   "passed": 22,
+   "failed": 0,
+   "errors": 0,
+   "rc": 0,
+   "ok": true,
+   "seconds": 0.0
+  },
+  "turn_status": [
+   "ok"
+  ],
+  "seconds": 318.1,
+  "stage_hidden": [],
+  "tokens": {
+   "input": 12650,
+   "output": 30033,
+   "reasoning": 0,
+   "cache": {
+    "read": 707347,
+    "write": 0
+   }
+  },
+  "steps": 21,
+  "tools": {
+   "read": 6,
+   "glob": 1,
+   "write": 1,
+   "shell": 8,
+   "edit": 14
+  },
+  "tool_errors": [],
+  "arg_errors": [],
+  "cutoffs": 0,
+  "flags": [],
+  "reasoning_chars": 63319,
+  "text_chars": 2674,
+  "server": {
+   "requests": 21,
+   "max_ctx": 47700,
+   "acceptance": 0.46,
+   "prompt_tokens": 12650,
+   "prompt_s": 15.0,
+   "gen_tokens": 42683,
+   "gen_s": 293.5
+  }
+ }
+]

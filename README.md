@@ -11,6 +11,15 @@ fork at [skyne98/mx-llama.cpp](https://github.com/skyne98/mx-llama.cpp/tree/ruqu
 `patches/mx-llama.cpp-ruquant.patch` on c4d12e2. The long logs are [REPORT-2026-11-02.md](REPORT-2026-11-02.md)
 (speed, tensor parallelism) and [REPORT-2026-11-03-quality.md](REPORT-2026-11-03-quality.md) (quality).
 
+Since 2026-11-06:
+- **NVIDIA:** the W4A4 matmuls and the 4-bit KV cache's attention run on INT4 tensor cores (Turing, Ampere, Ada),
+  bit-exact. On an RTX 3090, prefill goes from 329 to 1493 t/s and DFlash2 decode from 81 to 137 t/s.
+- **Vision:** `mmproj-Qwen3.8-27B-W4A4-F16.gguf` is a vision projector rotated into the model's residual basis
+  (`accuracy/rotate_mmproj.py`); the original projector does not work with this model.
+- **Agents:** an agentic coding test (`accuracy/agentic/`): opencode, sandboxed, against eight tasks with hidden tests.
+  All 16 runs with the 4-bit cache pass. The fork's server keeps its cache when a client returns the model's text in
+  a different tokenization.
+
 ## Use it
 
 ```sh

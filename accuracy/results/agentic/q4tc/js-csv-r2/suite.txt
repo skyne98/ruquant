@@ -1,0 +1,31 @@
+$ node --test
+✔ simple records (0.807889ms)
+✔ quoted delimiter and newline (0.089609ms)
+✔ escaped quotes (0.06382ms)
+✔ CRLF line endings (0.057328ms)
+✔ empty trailing field (0.053621ms)
+✔ unterminated quote reports the line where it starts (0.224843ms)
+✔ round trip (0.180289ms)
+✔ objects (0.124233ms)
+✔ trailing delimiter leaves an empty final field (0.062548ms)
+✔ empty quoted field at end of input (0.092955ms)
+✔ single empty quoted field (0.07946ms)
+✔ escaped quotes at field boundaries (0.046758ms)
+✔ quote inside an unquoted field is literal (0.0318ms)
+✔ CRLF separates records but a lone CR is literal (0.026981ms)
+✔ quoted field keeps CRLF literal (0.035877ms)
+✔ unterminated quote on the first line reports line 1 (0.061887ms)
+✔ unterminated quote spanning lines reports the field's start line (0.05305ms)
+✔ empty input yields no records (0.404311ms)
+✔ custom delimiter (0.059351ms)
+✔ round trip keeps a lone CR via quoting (0.041028ms)
+ℹ tests 20
+ℹ suites 0
+ℹ pass 20
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 36.346907
+
+[exit 0]

@@ -1,0 +1,155 @@
+ README.md         |  7 +++++++
+ notes/cli.py      | 32 ++++++++++++++++++++++++++++-
+ tests/test_cli.py | 60 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 98 insertions(+), 1 deletion(-)
+
+diff --git a/README.md b/README.md
+index ae56c4f..43b7970 100644
+--- a/README.md
++++ b/README.md
+@@ -4,7 +4,14 @@ A small command-line notebook. Notes live in a JSON file (`$NOTES_FILE`, default
+ 
+     python -m notes add "Buy milk" --tag errands
+     python -m notes list
++    python -m notes search "milk" --tag errands --since 2024-01-01
+     python -m notes tag 1 urgent
+     python -m notes delete 1
+ 
++`search QUERY [--tag TAG]... [--since YYYY-MM-DD]` matches the title or body
++case-insensitively as a substring (an empty query matches every note), keeps
++notes that have all the given `--tag` values and were created on or after
++`--since`, and prints them like `list` (newest first). When nothing matches it
++prints `no matches` to stderr and exits 1.
++
+ Tests: `python -m pytest`.
+diff --git a/notes/cli.py b/notes/cli.py
+index c2dd597..e0ff247 100644
+--- a/notes/cli.py
++++ b/notes/cli.py
+@@ -1,6 +1,6 @@
+ import argparse
+ import sys
+-from datetime import datetime
++from datetime import date, datetime
+ 
+ from .model import Note
+ from .storage import Store
+@@ -24,6 +24,24 @@ def cmd_list(store: Store, args) -> int:
+     return 0
+ 
+ 
++def cmd_search(store: Store, args) -> int:
++    q = args.query.lower()
++    tags = set(args.tag or [])
++    matched = [
++        n
++        for n in store.load()
++        if (not q or q in n.title.lower() or q in n.body.lower())
++        and (not tags or tags <= set(n.tags))
++        and (not args.since or n.created.date() >= args.since)
++    ]
++    if not matched:
++        print("no matches", file=sys.stderr)
++        return 1
++    for note in sorted(matched, key=lambda n: n.created, reverse=True):
++        print(note.line())
++    return 0
++
++
+ def cmd_delete(store: Store, args) -> int:
+     notes = store.load()
+     kept = [n for n in notes if n.id != args.id]
+@@ -45,6 +63,13 @@ def cmd_tag(store: Store, args) -> int:
+     return 1
+ 
+ 
++def _since_date(s: str) -> date:
++    try:
++        return datetime.fromisoformat(s).date()
++    except ValueError:
++        raise argparse.ArgumentTypeError(f"expected YYYY-MM-DD, got {s!r}")
++
++
+ def build_parser() -> argparse.ArgumentParser:
+     p = argparse.ArgumentParser(prog="notes")
+     p.add_argument("--file", help="notes file (default $NOTES_FILE or ~/.notes.json)")
+@@ -56,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
+     a.add_argument("--date", help="creation time, ISO format (default now)")
+     a.set_defaults(func=cmd_add)
+     sub.add_parser("list", help="list notes, newest first").set_defaults(func=cmd_list)
++    s = sub.add_parser("search", help="search notes by text, tags, and creation date")
++    s.add_argument("query", help='substring to match in title or body ("" matches all)')
++    s.add_argument("--tag", action="append")
++    s.add_argument("--since", type=_since_date, help="only notes created on or after YYYY-MM-DD")
++    s.set_defaults(func=cmd_search)
+     d = sub.add_parser("delete", help="delete a note")
+     d.add_argument("id", type=int)
+     d.set_defaults(func=cmd_delete)
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index e7ab4a9..480e584 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -31,3 +31,63 @@ def test_tag(notes_file, capsys):
+     capsys.readouterr()
+     main(["list"])
+     assert capsys.readouterr().out.strip().endswith("[a, b, c]")
++
++
++def _seed_search_notes():
++    assert main(["add", "Alpha", "--body", "buy MILK", "--tag", "work", "--date", "2024-01-02T10:00:00"]) == 0
++    assert main(["add", "beta note", "--body", "alpha hidden in body", "--tag", "home", "--date", "2024-02-03T10:00:00"]) == 0
++    assert main(["add", "gamma", "--tag", "work", "--tag", "home", "--date", "2024-03-04T10:00:00"]) == 0
++
++
++def test_search_title_and_body_case_insensitive(notes_file, capsys):
++    _seed_search_notes()
++    capsys.readouterr()
++    assert main(["search", "ALPHA"]) == 0
++    out = capsys.readouterr().out.splitlines()
++    assert out == ["  2  2024-02-03  beta note  [home]", "  1  2024-01-02  Alpha  [work]"]
++
++
++def test_search_body_only(notes_file, capsys):
++    _seed_search_notes()
++    capsys.readouterr()
++    assert main(["search", "milk"]) == 0
++    assert capsys.readouterr().out.splitlines() == ["  1  2024-01-02  Alpha  [work]"]
++
++
++def test_search_empty_query_matches_all(notes_file, capsys):
++    _seed_search_notes()
++    capsys.readouterr()
++    assert main(["search", ""]) == 0
++    out = capsys.readouterr().out.splitlines()
++    assert out == [
++        "  3  2024-03-04  gamma  [home, work]",
++        "  2  2024-02-03  beta note  [home]",
++        "  1  2024-01-02  Alpha  [work]",
++    ]
++
++
++def test_search_requires_all_tags(notes_file, capsys):
++    _seed_search_notes()
++    capsys.readouterr()
++    assert main(["search", "", "--tag", "work", "--tag", "home"]) == 0
++    assert capsys.readouterr().out.splitlines() == ["  3  2024-03-04  gamma  [home, work]"]
++    assert main(["search", "", "--tag", "work", "--tag", "errands"]) == 1
++    assert capsys.readouterr().err.strip() == "no matches"
++
++
++def test_search_since(notes_file, capsys):
++    _seed_search_notes()
++    capsys.readouterr()
++    assert main(["search", "", "--since", "2024-03-04"]) == 0
++    assert capsys.readouterr().out.splitlines() == ["  3  2024-03-04  gamma  [home, work]"]
++    assert main(["search", "", "--since", "2024-03-05"]) == 1
++    assert capsys.readouterr().err.strip() == "no matches"
++
++
++def test_search_no_matches(notes_file, capsys):
++    _seed_search_notes()
++    capsys.readouterr()
++    assert main(["search", "zzz"]) == 1
++    result = capsys.readouterr()
++    assert result.out == ""
++    assert result.err.strip() == "no matches"

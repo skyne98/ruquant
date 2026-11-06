@@ -1,0 +1,254 @@
+ library/admin.py      |  4 +--
+ library/cli.py        |  4 +--
+ library/fines.py      |  4 +--
+ library/loans.py      |  4 +--
+ library/notify.py     |  4 +--
+ library/users.py      | 15 ++++++++---
+ tests/test_library.py | 75 ++++++++++++++++++++++++++++++++++++++++++++++++---
+ 7 files changed, 92 insertions(+), 18 deletions(-)
+
+diff --git a/library/admin.py b/library/admin.py
+index 88f5e94..7f93543 100644
+--- a/library/admin.py
++++ b/library/admin.py
+@@ -3,11 +3,11 @@ from datetime import date
+ 
+ from . import db
+ from .fines import outstanding
+-from .users import get_user
++from .users import fetch_user
+ 
+ 
+ def user_summary(user_id: int, today: date) -> str:
+-    user = get_user(user_id)
++    user = fetch_user(user_id, include_deleted=True)
+     if user is None:
+         return f"#{user_id}: unknown"
+     state = f"deleted {user.deleted_at:%Y-%m-%d}" if user.deleted_at else "active"
+diff --git a/library/cli.py b/library/cli.py
+index 4c08ce6..a684993 100644
+--- a/library/cli.py
++++ b/library/cli.py
+@@ -2,12 +2,12 @@ import sys
+ from datetime import date
+ 
+ from .admin import all_summaries
+-from .users import get_user
++from .users import fetch_user
+ 
+ 
+ def main(argv: list[str]) -> int:
+     if argv[:1] == ["whois"]:
+-        user = get_user(int(argv[1]))
++        user = fetch_user(int(argv[1]))
+         print(user.name if user else "unknown")
+         return 0 if user else 1
+     if argv[:1] == ["report"]:
+diff --git a/library/fines.py b/library/fines.py
+index c8c4813..eb22744 100644
+--- a/library/fines.py
++++ b/library/fines.py
+@@ -1,7 +1,7 @@
+ from datetime import date
+ 
+ from . import db
+-from .users import get_user
++from .users import fetch_user
+ 
+ CENTS_PER_DAY = 25
+ CAP_CENTS = 1000
+@@ -14,7 +14,7 @@ def fine_for(loan: db.Loan, today: date) -> int:
+ 
+ 
+ def outstanding(user_id: int, today: date) -> int:
+-    user = get_user(user_id)
++    user = fetch_user(user_id, include_deleted=True)
+     if user is None:
+         return 0
+     return sum(fine_for(l, today) for l in db.LOANS.values() if l.user_id == user.id)
+diff --git a/library/loans.py b/library/loans.py
+index 60bbbc0..37f68ec 100644
+--- a/library/loans.py
++++ b/library/loans.py
+@@ -2,7 +2,7 @@ from datetime import date, timedelta
+ 
+ from . import db
+ from .books import available
+-from .users import get_user, is_staff
++from .users import fetch_user, is_staff
+ 
+ LOAN_DAYS = 21
+ STAFF_LOAN_DAYS = 60
+@@ -19,7 +19,7 @@ def open_loans(user_id: int) -> list[db.Loan]:
+ 
+ def lend(user_id: int, book_id: int, today: date | None = None) -> db.Loan:
+     today = today or date.today()
+-    user = get_user(user_id)
++    user = fetch_user(user_id)
+     if user is None:
+         raise LoanError(f"no such user {user_id}")
+     if len(open_loans(user.id)) >= MAX_LOANS:
+diff --git a/library/notify.py b/library/notify.py
+index 30a23eb..72b63a2 100644
+--- a/library/notify.py
++++ b/library/notify.py
+@@ -1,7 +1,7 @@
+ from datetime import date
+ 
+ from . import db
+-from .users import get_user
++from .users import fetch_user
+ 
+ 
+ def overdue_emails(today: date) -> list[tuple[str, str]]:
+@@ -9,7 +9,7 @@ def overdue_emails(today: date) -> list[tuple[str, str]]:
+     out = []
+     for loan in sorted(db.LOANS.values(), key=lambda l: l.id):
+         if loan.returned is None and loan.due < today:
+-            user = get_user(loan.user_id)
++            user = fetch_user(loan.user_id)
+             if user is None:
+                 continue
+             book = db.BOOKS[loan.book_id]
+diff --git a/library/users.py b/library/users.py
+index f5d7786..0141030 100644
+--- a/library/users.py
++++ b/library/users.py
+@@ -7,12 +7,19 @@ class UserNotFound(LookupError):
+     pass
+ 
+ 
+-def get_user(id: int) -> db.User | None:
+-    return db.USERS.get(id)
++def fetch_user(user_id: int, *, include_deleted: bool = False) -> db.User | None:
++    """Return the user with this id, or None if they don't exist.
++
++    Deleted users are hidden unless include_deleted=True.
++    """
++    user = db.USERS.get(user_id)
++    if user is None or (user.deleted_at is not None and not include_deleted):
++        return None
++    return user
+ 
+ 
+ def require_user(id: int) -> db.User:
+-    user = get_user(id)
++    user = fetch_user(id)
+     if user is None:
+         raise UserNotFound(id)
+     return user
+@@ -29,5 +36,5 @@ def delete_user(id: int, when: date | None = None) -> None:
+ 
+ 
+ def is_staff(id: int) -> bool:
+-    user = get_user(id)
++    user = fetch_user(id)
+     return user is not None and "staff" in user.roles
+diff --git a/tests/test_library.py b/tests/test_library.py
+index 0ed0b6c..6665a7c 100644
+--- a/tests/test_library.py
++++ b/tests/test_library.py
+@@ -4,18 +4,40 @@ import pytest
+ 
+ from library.admin import user_summary
+ from library.books import add_book
++from library.cli import main
+ from library.fines import outstanding
+ from library.loans import LoanError, give_back, lend
+ from library.notify import overdue_emails
+-from library.users import create_user, get_user
++from library.users import UserNotFound, create_user, delete_user, fetch_user, is_staff, require_user
+ 
+ D = date(2024, 3, 1)
+ 
+ 
+-def test_get_user():
++def test_fetch_user():
+     u = create_user("Ann", "ann@x.org", D)
+-    assert get_user(u.id) is u
+-    assert get_user(999) is None
++    assert fetch_user(u.id) is u
++    assert fetch_user(999) is None
++
++
++def test_fetch_user_deleted():
++    u = create_user("Ann", "ann@x.org", D)
++    delete_user(u.id, D)
++    assert fetch_user(u.id) is None
++    assert fetch_user(u.id, include_deleted=True) is u
++
++
++def test_require_user_deleted():
++    u = create_user("Bob", "bob@x.org", D)
++    delete_user(u.id, D)
++    with pytest.raises(UserNotFound):
++        require_user(u.id)
++
++
++def test_is_staff_deleted():
++    u = create_user("Cy", "cy@x.org", D, {"staff"})
++    assert is_staff(u.id)
++    delete_user(u.id, D)
++    assert not is_staff(u.id)
+ 
+ 
+ def test_lend_and_fine():
+@@ -27,6 +49,14 @@ def test_lend_and_fine():
+     assert outstanding(u.id, date(2024, 4, 1)) == 75
+ 
+ 
++def test_lend_deleted_raises():
++    u = create_user("Dee", "dee@x.org", D)
++    b = add_book("Ulysses", "Joyce")
++    delete_user(u.id, D)
++    with pytest.raises(LoanError):
++        lend(u.id, b.id, D)
++
++
+ def test_staff_loan_longer():
+     u = create_user("Cy", "cy@x.org", D, {"staff"})
+     loan = lend(u.id, add_book("Emma", "Austen").id, D)
+@@ -47,6 +77,43 @@ def test_overdue_emails():
+     assert overdue_emails(date(2024, 4, 1)) == [("eve@x.org", "Dear Eve, 'Ubik' was due on 2024-03-22.")]
+ 
+ 
++def test_overdue_emails_skip_deleted():
++    u = create_user("Eve", "eve@x.org", D)
++    lend(u.id, add_book("Ubik", "Dick").id, D)
++    delete_user(u.id, date(2024, 3, 25))
++    assert overdue_emails(date(2024, 4, 1)) == []
++
++
++def test_fines_still_count_for_deleted():
++    u = create_user("Jon", "jon@x.org", D)
++    loan = lend(u.id, add_book("Dune", "Herbert").id, D)
++    delete_user(u.id, D)
++    give_back(loan.id, date(2024, 3, 25))
++    assert outstanding(u.id, date(2024, 4, 1)) == 75
++
++
++def test_whois(capsys):
++    u = create_user("Fay", "fay@x.org", D)
++    assert main(["whois", str(u.id)]) == 0
++    assert capsys.readouterr().out.strip() == "Fay"
++
++
++def test_whois_deleted_unknown(capsys):
++    u = create_user("Fay", "fay@x.org", D)
++    delete_user(u.id, D)
++    assert main(["whois", str(u.id)]) == 1
++    assert capsys.readouterr().out.strip() == "unknown"
++
++
+ def test_summary():
+     u = create_user("Fay", "fay@x.org", D)
+     assert user_summary(u.id, D) == f"#{u.id} Fay <fay@x.org> active, 0 loans, owes 0 cents"
++
++
++def test_summary_lists_deleted():
++    u = create_user("Kim", "kim@x.org", D)
++    lend(u.id, add_book("Dune", "Herbert").id, D)
++    delete_user(u.id, date(2024, 3, 15))
++    assert user_summary(u.id, date(2024, 4, 1)) == (
++        f"#{u.id} Kim <kim@x.org> deleted 2024-03-15, 1 loans, owes 250 cents"
++    )

@@ -1,0 +1,79 @@
+{
+ "label": "fixedtest",
+ "task": "md-session",
+ "rep": 1,
+ "model": "llamacpp/qwen3.8-27b-w4a4",
+ "turns": [
+  {
+   "turn": 1,
+   "status": "ok",
+   "seconds": 134.5,
+   "hidden": {
+    "passed": 6,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   }
+  },
+  {
+   "turn": 2,
+   "status": "ok",
+   "seconds": 300.9,
+   "hidden": {
+    "passed": 11,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   }
+  },
+  {
+   "turn": 3,
+   "status": "ok",
+   "seconds": 466.4,
+   "hidden": {
+    "passed": 16,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.1
+   }
+  },
+  {
+   "turn": 4,
+   "status": "ok",
+   "seconds": 795.8,
+   "hidden": {
+    "passed": 21,
+    "failed": 0,
+    "errors": 0,
+    "rc": 0,
+    "ok": true,
+    "seconds": 0.2
+   }
+  }
+ ],
+ "started": 1793984232.5544412,
+ "session": "ses_e4e35024effegFreGx0iXT1071",
+ "seconds": 1698.2,
+ "hidden": {
+  "passed": 21,
+  "failed": 0,
+  "errors": 0,
+  "rc": 0,
+  "ok": true,
+  "seconds": 0.2
+ },
+ "suite": {
+  "passed": 102,
+  "failed": 0,
+  "errors": 0,
+  "rc": 0,
+  "ok": true,
+  "seconds": 0.2
+ }
+}

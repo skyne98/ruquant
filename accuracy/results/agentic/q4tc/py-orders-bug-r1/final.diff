@@ -1,0 +1,67 @@
+ shop/pricing.py     |  6 +-----
+ tests/test_basic.py | 22 +++++++++++++++++++++-
+ 2 files changed, 22 insertions(+), 6 deletions(-)
+
+diff --git a/shop/pricing.py b/shop/pricing.py
+index a57a1ec..0bc003e 100644
+--- a/shop/pricing.py
++++ b/shop/pricing.py
+@@ -1,5 +1,4 @@
+ from .models import LineItem, Order
+-from .money import percent_of
+ 
+ BULK_MIN_QTY = 10
+ BULK_PERCENT = 10
+@@ -7,10 +6,7 @@ BULK_PERCENT = 10
+ 
+ def line_total(item: LineItem) -> int:
+     """Price of one line before order-level discounts."""
+-    total = item.product.price_cents * item.qty
+-    if item.qty >= BULK_MIN_QTY:
+-        total -= percent_of(total, BULK_PERCENT)
+-    return total
++    return item.product.price_cents * item.qty
+ 
+ 
+ def subtotal(order: Order) -> int:
+diff --git a/tests/test_basic.py b/tests/test_basic.py
+index 46bac87..03de730 100644
+--- a/tests/test_basic.py
++++ b/tests/test_basic.py
+@@ -1,11 +1,12 @@
+ import pytest
+ 
+-from shop.checkout import receipt, total
++from shop.checkout import discounts, receipt, subtotal, total
+ from shop.discounts import InvalidCoupon
+ from shop.models import Order, Product
+ 
+ PEN = Product("PEN-1", "Pen", 150)
+ NOVEL = Product("BK-7", "Novel", 1299, "books")
++NOTEBOOK = Product("NB-A5", "Notebook", 250)
+ 
+ 
+ def test_simple_total():
+@@ -45,3 +46,22 @@ def test_receipt_lists_items():
+     o.add(PEN, 2)
+     text = receipt(o)
+     assert "2 x Pen" in text and "$3.00" in text
++
++
++def test_bulk_discount_applied_once():
++    """12 notebooks at $2.50: $30.00 gross, 10% bulk = $3.00 off, total $27.00."""
++    o = Order("erin")
++    o.add(NOTEBOOK, 12)
++    assert total(o) == 2700
++
++
++def test_receipt_adds_up():
++    """The bulk discount must count exactly once: subtotal - discounts == total,
++    and the receipt keeps its discount line."""
++    o = Order("erin")
++    o.add(NOTEBOOK, 12)
++    text = receipt(o)
++    assert text.count("Bulk discount (Notebook)") == 1
++    assert "$30.00" in text and "-$3.00" in text and "$27.00" in text
++    assert subtotal(o) == 3000
++    assert total(o) == subtotal(o) - sum(a for _, a in discounts(o))

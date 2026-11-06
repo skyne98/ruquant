@@ -1,0 +1,60 @@
+$ cargo test --offline
+warning: method `peek_at` is never used
+   --> src/lib.rs:179:8
+    |
+166 | impl Parser {
+    | ----------- method in this implementation
+...
+179 |     fn peek_at(&self, k: usize) -> Option<&Tok> {
+    |        ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `calc` (lib) generated 1 warning
+warning: `calc` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (target/debug/deps/calc-c12bb7e4b7c8c672)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/smoke.rs (target/debug/deps/smoke-fa51461c3861b9a5)
+
+running 1 test
+test smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spec.rs (target/debug/deps/spec-ef3f3b9c8ba189ce)
+
+running 18 tests
+test call_evaluation_order ... ok
+test arity ... ok
+test division_by_zero ... ok
+test functions ... ok
+test mixed ... ok
+test mod_sign_of_dividend ... ok
+test numbers ... ok
+test parse_errors_come_first ... ok
+test parens ... ok
+test power ... ok
+test precedence ... ok
+test unary ... ok
+test unexpected_char ... ok
+test unexpected_end ... ok
+test unknown_function ... ok
+test unexpected_token ... ok
+test whitespace_is_ignored ... ok
+test variables ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests calc
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+[exit 0]

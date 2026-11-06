@@ -11,6 +11,8 @@ Recorded GPU profiles, kept so any of them can be studied again later.
 **Tools**
 - `rig/prof.sh` records a profile on the box and never overwrites one.
 - `rig/prof_pull.sh HOST` copies the finished ones here.
+- `rig/prof_cuda.sh LABEL [VAR=v ...] -- CMD` records an Nsight Systems (or, with `PROF_TOOL=ncu`, Nsight Compute)
+  profile on a local NVIDIA GPU into `profiles/<GPU>/` (`profiles/3090/`), the same way: archive plus `.meta.txt`.
 - `python3 rig/prof_summary.py ARCHIVE [KERNEL_REGEX]` prints kernel-trace medians and counter medians per kernel
   and grid, from a directory or straight from an archive.
 
@@ -60,3 +62,27 @@ Builds `build-fa` (v1), `build-fa2` (v2), `build-fa3` (v3, kept), `build-fa4` (v
 | `fa-fa3-pmc0` … `-pmc4`, `fa-fa3-trace` | rocprofv3 counters and kernel trace of v3 at 64k (llama-bench pp8) | 1.22 ms per call, VALU busy 50%, waves waiting 54%, 64 GB/s: latency-bound at 2 workgroups per CU |
 | `fa-dot8-quality` | KLD with 8-token ubatches (f16, stock q4_0, dot8 int4 Q, int8 Q) and DFlash2 after a 64k document (one GPU, TP4) | KLD 0.0416 / 0.0442 / 0.0423 / 0.0425; one-GPU DFlash2 step at 64k 71.5 ms against 79-80 with f16 |
 | `fa-dot8-final` | final build (`build-fa7`, on by default, Q rounded as q4_0): all FLASH_ATTN_EXT tests, KLD at 8-token ubatches, one-GPU speed at 64k | 4001/4001 tests pass; KLD 0.0434; verify 59.6 ms, decode 38.5 ms at 64k |
+
+## 2026-11-06: W4A4 and q4_0 attention on the INT4 tensor cores (RTX 3090, `build-llama/`)
+
+`rig/prof_cuda.sh`, test-backend-ops perf mode (fuses three repeats of one weight per launch where it can).
+The archives themselves stay on the workstation (`.gitignore`): Nsight reports record the whole process environment,
+credentials included. Their `.meta.txt` files are here.
+
+| profiles | what | result |
+|---|---|---|
+| `w4a4-n1-tc0`, `w4a4-n1-tc1` (14:07:42, 14:07:45) | empty: the `-p` filter matched no test case | none |
+| `w4a4-n1-tc0`, `w4a4-n1-tc1` (14:07:57, 14:08:06) | nsys, 17408×5120 at one token, emulated dot8 skinny kernel vs the tensor-core kernel | skinny 147 us per fused launch of 3; tensor cores 65 us per weight, quantizer 14 us per 3 |
+| `w4a4-n1-tc1-ncu` | ncu full set, tensor-core kernel, same shape | 65.7 us, DRAM 84% busy (723 GB/s read), occupancy 97%, stalls on long scoreboard: memory-bound |
+| `w4a4-n1-skinny-ncu` | ncu full set, skinny kernel (fused launch of 3) | 143 us for 108 MB from DRAM (752 GB/s; L2 hits 27% as the three repeats share the weight): same DRAM rate as the tensor cores, the perf-mode speed was L2 reuse |
+| `fa-q4-tc-test` | nsys of the q4_0 attention tests at the 27B's shapes | `rq_fa_tc_kernel` ran for every case (3 template instances), plus `rq_fa_quant_q` and the combine kernel |
+
+## 2026-11-06: the server's cache after long answers (box 1, fork tree with the ruquant server changes)
+
+Builds `build-ckpt` (generation checkpoints, `LLAMA_GEN_CKPT_STEP`) and `build-tm` (plus text-level cache matching,
+`LLAMA_TEXT_MATCH`), both with the INT4 tensor-core port (inactive on gfx906).
+
+| profiles | what | result |
+|---|---|---|
+| `gen-ckpt` | `rig/gen_ckpt_bench.sh`: decode t/s of 8192 greedy tokens and the re-processing after a long agent answer, checkpoints off / every 2048, TP2 and TP4 (published command); the vision check with the rotated mmproj at TP4 | cost 0.3% (TP2) / 0.75% (TP4); one character changed at 85% of an 11.7k-token answer: 11754 -> 1499 tokens re-processed (TP2); vision 3 / 3; a sampled token sequence that re-tokenizes differently (`?=`) at TP4 |
+| `text-match` | `rig/text_match_bench.sh`: a prompt cached with one word in a 3-token split, sent back as text, TP4 | re-processed 6698 tokens without text matching, 8 with it |

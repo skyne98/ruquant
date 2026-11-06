@@ -1,0 +1,5 @@
+$ python -m pytest -q -p no:cacheprovider tests/test_hidden_s1.py tests/test_hidden_s2.py tests/test_hidden_s3.py tests/test_hidden_s4.py
+.....................                                                    [100%]
+21 passed in 0.05s
+
+[exit 0]

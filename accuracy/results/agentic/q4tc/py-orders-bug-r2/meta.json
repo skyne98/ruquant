@@ -1,0 +1,32 @@
+{
+ "label": "q4tc",
+ "task": "py-orders-bug",
+ "rep": 2,
+ "model": "llamacpp/qwen3.8-27b-w4a4",
+ "turns": [
+  {
+   "turn": 1,
+   "status": "ok",
+   "seconds": 79.1
+  }
+ ],
+ "started": 1793987789.4428058,
+ "session": "ses_e4dfebc64ffe8kfKTz5KNXKz6e",
+ "seconds": 79.1,
+ "hidden": {
+  "passed": 11,
+  "failed": 0,
+  "errors": 0,
+  "rc": 0,
+  "ok": true,
+  "seconds": 0.1
+ },
+ "suite": {
+  "passed": 8,
+  "failed": 0,
+  "errors": 0,
+  "rc": 0,
+  "ok": true,
+  "seconds": 0.1
+ }
+}

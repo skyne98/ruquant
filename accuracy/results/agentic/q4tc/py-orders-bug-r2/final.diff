@@ -1,0 +1,62 @@
+ shop/pricing.py     |  6 +-----
+ tests/test_basic.py | 21 +++++++++++++++++++++
+ 2 files changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/shop/pricing.py b/shop/pricing.py
+index a57a1ec..0bc003e 100644
+--- a/shop/pricing.py
++++ b/shop/pricing.py
+@@ -1,5 +1,4 @@
+ from .models import LineItem, Order
+-from .money import percent_of
+ 
+ BULK_MIN_QTY = 10
+ BULK_PERCENT = 10
+@@ -7,10 +6,7 @@ BULK_PERCENT = 10
+ 
+ def line_total(item: LineItem) -> int:
+     """Price of one line before order-level discounts."""
+-    total = item.product.price_cents * item.qty
+-    if item.qty >= BULK_MIN_QTY:
+-        total -= percent_of(total, BULK_PERCENT)
+-    return total
++    return item.product.price_cents * item.qty
+ 
+ 
+ def subtotal(order: Order) -> int:
+diff --git a/tests/test_basic.py b/tests/test_basic.py
+index 46bac87..e7a456c 100644
+--- a/tests/test_basic.py
++++ b/tests/test_basic.py
+@@ -6,6 +6,7 @@ from shop.models import Order, Product
+ 
+ PEN = Product("PEN-1", "Pen", 150)
+ NOVEL = Product("BK-7", "Novel", 1299, "books")
++NOTEBOOK = Product("NB-A5", "Notebook", 250)
+ 
+ 
+ def test_simple_total():
+@@ -45,3 +46,23 @@ def test_receipt_lists_items():
+     o.add(PEN, 2)
+     text = receipt(o)
+     assert "2 x Pen" in text and "$3.00" in text
++
++
++def test_bulk_discount_charged_once():
++    # 12 x $2.50 = $30.00 gross; 10% bulk off = $3.00; charged $27.00.
++    o = Order("eve")
++    o.add(NOTEBOOK, 12)
++    assert total(o) == 2700
++
++
++def test_receipt_adds_up_with_bulk_discount():
++    # The bulk discount must appear exactly once, on its own line, and the
++    # line item / subtotal must be gross so line + subtotal - discount = total.
++    o = Order("eve")
++    o.add(NOTEBOOK, 12)
++    text = receipt(o)
++    assert text.count("Bulk discount") == 1
++    assert "12 x Notebook" in text
++    assert text.count("$30.00") == 2  # line item and subtotal, before discount
++    assert "-$3.00" in text
++    assert text.count("$27.00") == 1  # total, charged once

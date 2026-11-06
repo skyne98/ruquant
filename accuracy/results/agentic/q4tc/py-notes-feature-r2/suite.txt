@@ -1,0 +1,5 @@
+$ python -m pytest -q -p no:cacheprovider
+.........                                                                [100%]
+9 passed in 0.04s
+
+[exit 0]

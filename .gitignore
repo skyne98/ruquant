@@ -17,3 +17,6 @@ dist
 /accuracy/ref
 /models
 /.nix-dev-profile*
+
+# Nsight archives record the whole process environment (credentials included): kept locally, never committed
+profiles/3090/*.tar.gz

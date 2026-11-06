@@ -1,0 +1,12 @@
+label: fa-q4-tc-test
+time: 2026-11-06T14:21:06Z
+host: fox-workstation
+gpu: NVIDIA GeForce RTX 3090 (driver 595.112.07)
+command: build-llama/build/bin/test-backend-ops -o FLASH_ATTN_EXT -b CUDA0 -p hsk=256,hsv=256,nh=4,nr23=\[6,1\].*q4_0
+settings: 
+binary: build-llama/build/bin/test-backend-ops
+libggml-cuda.so md5: 26f53d124c027f3487cca8254fe92587
+environment:
+  LD_LIBRARY_PATH=/run/opengl-driver/lib:/nix/store/w36w2725s1sx6bscgz2sdq56q654y2d5-pipewire-1.6.9-jack/lib
+tool: nsys profile --trace=cuda --stats=true
+exit: 0

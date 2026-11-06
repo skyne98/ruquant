@@ -1,0 +1,671 @@
+ src/lib.rs    | 355 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ tests/spec.rs | 297 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 651 insertions(+), 1 deletion(-)
+
+diff --git a/src/lib.rs b/src/lib.rs
+index 435b87a..d351cce 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -18,5 +18,358 @@ pub enum Error {
+ }
+ 
+ pub fn eval(src: &str, vars: &HashMap<String, f64>) -> Result<f64, Error> {
+-    todo!()
++    let mut p = Parser::new(src, vars);
++    let e = p.parse_expr()?;
++    p.finish(e)
++}
++
++// ---------------------------------------------------------------------------
++// Lexer
++// ---------------------------------------------------------------------------
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum Op {
++    Add,
++    Sub,
++    Mul,
++    Div,
++    Rem,
++    Pow,
++}
++
++#[derive(Debug, Clone, PartialEq)]
++enum Tok {
++    Num(f64, usize),
++    Ident(String, usize),
++    Op(Op, usize),
++    LParen(usize),
++    RParen(usize),
++    Comma(usize),
++}
++
++impl Tok {
++    fn pos(&self) -> usize {
++        match self {
++            Tok::Num(_, p)
++            | Tok::Ident(_, p)
++            | Tok::Op(_, p)
++            | Tok::LParen(p)
++            | Tok::RParen(p)
++            | Tok::Comma(p) => *p,
++        }
++    }
++}
++
++struct Lexer<'a> {
++    bytes: &'a [u8],
++    pos: usize,
++}
++
++impl<'a> Lexer<'a> {
++    fn new(src: &'a str) -> Self {
++        Lexer { bytes: src.as_bytes(), pos: 0 }
++    }
++
++    /// Produces the next token, or `None` at end of input. Only
++    /// `UnexpectedChar` can be produced here; all other errors come from
++    /// the parser, so errors surface left to right as tokens are demanded.
++    fn next_token(&mut self) -> Result<Option<Tok>, Error> {
++        let n = self.bytes.len();
++        while self.pos < n && self.bytes[self.pos].is_ascii_whitespace() {
++            self.pos += 1;
++        }
++        if self.pos >= n {
++            return Ok(None);
++        }
++        let start = self.pos;
++        let b = self.bytes[self.pos];
++        let single = |op: Option<Op>| match op {
++            Some(op) => Tok::Op(op, start),
++            None => match b {
++                b'(' => Tok::LParen(start),
++                b')' => Tok::RParen(start),
++                _ => Tok::Comma(start),
++            },
++        };
++        match b {
++            b'(' => { self.pos += 1; Ok(Some(single(None))) }
++            b')' => { self.pos += 1; Ok(Some(single(None))) }
++            b',' => { self.pos += 1; Ok(Some(single(None))) }
++            b'+' => { self.pos += 1; Ok(Some(single(Some(Op::Add)))) }
++            b'-' => { self.pos += 1; Ok(Some(single(Some(Op::Sub)))) }
++            b'*' => { self.pos += 1; Ok(Some(single(Some(Op::Mul)))) }
++            b'/' => { self.pos += 1; Ok(Some(single(Some(Op::Div)))) }
++            b'%' => { self.pos += 1; Ok(Some(single(Some(Op::Rem)))) }
++            b'^' => { self.pos += 1; Ok(Some(single(Some(Op::Pow)))) }
++            _ if b.is_ascii_digit() || b == b'.' => {
++                let (val, end) = Self::read_number(self.bytes, start)?;
++                self.pos = end;
++                Ok(Some(Tok::Num(val, start)))
++            }
++            _ if b == b'_' || b.is_ascii_alphabetic() => {
++                let start = self.pos;
++                while self.pos < n && (self.bytes[self.pos] == b'_'
++                    || self.bytes[self.pos].is_ascii_alphabetic()
++                    || self.bytes[self.pos].is_ascii_digit())
++                {
++                    self.pos += 1;
++                }
++                let name: String = self.bytes[start..self.pos].iter().map(|&c| c as char).collect();
++                Ok(Some(Tok::Ident(name, start)))
++            }
++            _ => Err(Error::UnexpectedChar(start)),
++        }
++    }
++
++    /// Reads a number starting at `at` (a digit or `.`) and returns its value
++    /// and the position just past it. A number is digits, an optional
++    /// fraction (a `.` only counts when followed by digits) and an optional
++    /// well-formed exponent (`e`/`E`, optional sign, at least one digit).
++    /// A lone `.` (no digits at all) can't start a token.
++    fn read_number(bytes: &[u8], at: usize) -> Result<(f64, usize), Error> {
++        let n = bytes.len();
++        let mut pos = at;
++        let mut seen_digit = false;
++        while pos < n && bytes[pos].is_ascii_digit() {
++            pos += 1;
++            seen_digit = true;
++        }
++        if pos < n && bytes[pos] == b'.' && pos + 1 < n && bytes[pos + 1].is_ascii_digit() {
++            pos += 1;
++            while pos < n && bytes[pos].is_ascii_digit() {
++                pos += 1;
++                seen_digit = true;
++            }
++        }
++        if pos < n && (bytes[pos] == b'e' || bytes[pos] == b'E') {
++            let mut q = pos + 1;
++            if q < n && (bytes[q] == b'+' || bytes[q] == b'-') {
++                q += 1;
++            }
++            if q < n && bytes[q].is_ascii_digit() {
++                pos = q;
++                while pos < n && bytes[pos].is_ascii_digit() {
++                    pos += 1;
++                }
++            }
++        }
++        if !seen_digit {
++            return Err(Error::UnexpectedChar(at));
++        }
++        let text: String = bytes[at..pos].iter().map(|&c| c as char).collect();
++        let val: f64 = text.parse().unwrap();
++        Ok((val, pos))
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Parser
++// ---------------------------------------------------------------------------
++
++#[derive(Debug)]
++enum Expr {
++    Num(f64),
++    Var(String),
++    Call(String, Vec<Expr>),
++    Neg(Box<Expr>),
++    Bin(Op, Box<Expr>, Box<Expr>),
++}
++
++struct Parser<'a> {
++    lexer: Lexer<'a>,
++    vars: &'a HashMap<String, f64>,
++    peeked: Option<Tok>,
++}
++
++impl<'a> Parser<'a> {
++    fn new(src: &'a str, vars: &'a HashMap<String, f64>) -> Self {
++        Parser { lexer: Lexer::new(src), vars, peeked: None }
++    }
++
++    /// Returns the next token without consuming it, lexing on demand so that
++    /// errors surface left to right.
++    fn peek(&mut self) -> Result<Option<Tok>, Error> {
++        if self.peeked.is_none() {
++            self.peeked = self.lexer.next_token()?;
++        }
++        Ok(self.peeked.clone())
++    }
++
++    fn advance(&mut self) -> Result<Option<Tok>, Error> {
++        let t = self.peek()?;
++        self.peeked = None;
++        Ok(t)
++    }
++
++    /// Parses the whole expression and rejects trailing tokens.
++    fn finish(&mut self, e: Expr) -> Result<f64, Error> {
++        match self.peek()? {
++            Some(t) => Err(Error::UnexpectedToken(t.pos())),
++            None => eval_expr(&e, self.vars),
++        }
++    }
++
++    // expr := additive
++    fn parse_expr(&mut self) -> Result<Expr, Error> {
++        self.parse_additive()
++    }
++
++    // additive := multiplicative ((+|-) multiplicative)*   (left assoc)
++    fn parse_additive(&mut self) -> Result<Expr, Error> {
++        let mut left = self.parse_multiplicative()?;
++        loop {
++            match self.peek()? {
++                Some(Tok::Op(Op::Add, _)) | Some(Tok::Op(Op::Sub, _)) => {
++                    let op = match self.advance()?.as_ref().unwrap() {
++                        Tok::Op(o, _) => *o,
++                        _ => unreachable!(),
++                    };
++                    let right = self.parse_multiplicative()?;
++                    left = Expr::Bin(op, Box::new(left), Box::new(right));
++                }
++                _ => break,
++            }
++        }
++        Ok(left)
++    }
++
++    // multiplicative := unary (('*'|'/'|'%') unary)*   (left assoc)
++    fn parse_multiplicative(&mut self) -> Result<Expr, Error> {
++        let mut left = self.parse_unary()?;
++        loop {
++            match self.peek()? {
++                Some(Tok::Op(Op::Mul, _))
++                | Some(Tok::Op(Op::Div, _))
++                | Some(Tok::Op(Op::Rem, _)) => {
++                    let op = match self.advance()?.as_ref().unwrap() {
++                        Tok::Op(o, _) => *o,
++                        _ => unreachable!(),
++                    };
++                    let right = self.parse_unary()?;
++                    left = Expr::Bin(op, Box::new(left), Box::new(right));
++                }
++                _ => break,
++            }
++        }
++        Ok(left)
++    }
++
++    // unary := ('-'|'+')* power    (signs repeat: --2 == 2)
++    fn parse_unary(&mut self) -> Result<Expr, Error> {
++        let mut negs = 0usize;
++        loop {
++            match self.peek()? {
++                Some(Tok::Op(Op::Sub, _)) => { self.advance()?; negs += 1; }
++                Some(Tok::Op(Op::Add, _)) => { self.advance()?; }
++                _ => break,
++            }
++        }
++        let base = self.parse_power()?;
++        if negs % 2 == 1 {
++            Ok(Expr::Neg(Box::new(base)))
++        } else {
++            Ok(base)
++        }
++    }
++
++    // power := primary ('^' unary)?   (right assoc; '^' binds tighter than
++    // unary minus, and the exponent is a unary expression)
++    fn parse_power(&mut self) -> Result<Expr, Error> {
++        let base = self.parse_primary()?;
++        if let Some(Tok::Op(Op::Pow, _)) = self.peek()? {
++            self.advance()?;
++            let exp = self.parse_unary()?;
++            Ok(Expr::Bin(Op::Pow, Box::new(base), Box::new(exp)))
++        } else {
++            Ok(base)
++        }
++    }
++
++    // primary := number | ident | ident '(' args ')' | '(' expr ')'
++    fn parse_primary(&mut self) -> Result<Expr, Error> {
++        match self.advance()?.ok_or(Error::UnexpectedEnd)? {
++            Tok::Num(v, _) => Ok(Expr::Num(v)),
++            Tok::Ident(name, _) => {
++                if matches!(self.peek()?, Some(Tok::LParen(_))) {
++                    self.advance()?; // '('
++                    let mut args = Vec::new();
++                    if !matches!(self.peek()?, Some(Tok::RParen(_))) {
++                        args.push(self.parse_expr()?);
++                        while matches!(self.peek()?, Some(Tok::Comma(_))) {
++                            self.advance()?; // ','
++                            args.push(self.parse_expr()?);
++                        }
++                    }
++                    match self.advance()?.ok_or(Error::UnexpectedEnd)? {
++                        Tok::RParen(_) => Ok(Expr::Call(name, args)),
++                        t => Err(Error::UnexpectedToken(t.pos())),
++                    }
++                } else {
++                    Ok(Expr::Var(name))
++                }
++            }
++            Tok::LParen(_) => {
++                let e = self.parse_expr()?;
++                match self.advance()?.ok_or(Error::UnexpectedEnd)? {
++                    Tok::RParen(_) => Ok(e),
++                    t => Err(Error::UnexpectedToken(t.pos())),
++                }
++            }
++            t => Err(Error::UnexpectedToken(t.pos())),
++        }
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Evaluation
++// ---------------------------------------------------------------------------
++
++fn eval_expr(e: &Expr, vars: &HashMap<String, f64>) -> Result<f64, Error> {
++    match e {
++        Expr::Num(v) => Ok(*v),
++        Expr::Var(name) => {
++            vars.get(name).copied().ok_or_else(|| Error::UnknownVariable(name.clone()))
++        }
++        Expr::Neg(inner) => Ok(-eval_expr(inner, vars)?),
++        Expr::Bin(op, l, r) => {
++            let a = eval_expr(l, vars)?;
++            let b = eval_expr(r, vars)?;
++            match op {
++                Op::Add => Ok(a + b),
++                Op::Sub => Ok(a - b),
++                Op::Mul => Ok(a * b),
++                Op::Div => {
++                    if b == 0.0 { Err(Error::DivisionByZero) } else { Ok(a / b) }
++                }
++                Op::Rem => {
++                    if b == 0.0 { Err(Error::DivisionByZero) } else { Ok(a % b) }
++                }
++                Op::Pow => Ok(a.powf(b)),
++            }
++        }
++        Expr::Call(name, args) => eval_call(name, args, vars),
++    }
++}
++
++fn eval_call(name: &str, args: &[Expr], vars: &HashMap<String, f64>) -> Result<f64, Error> {
++    // The call site sits left of its arguments, so unknown-function and
++    // arity errors are reported before any errors inside the arguments.
++    let known = match name {
++        "abs" | "sqrt" => args.len() == 1,
++        "min" | "max" => !args.is_empty(),
++        _ => return Err(Error::UnknownFunction(name.to_owned())),
++    };
++    if !known {
++        return Err(Error::Arity(name.to_owned(), args.len()));
++    }
++    let vals: Result<Vec<f64>, Error> =
++        args.iter().map(|a| eval_expr(a, vars)).collect();
++    let vals = vals?;
++    match name {
++        "abs" => Ok(vals[0].abs()),
++        "sqrt" => Ok(vals[0].sqrt()),
++        "min" => Ok(vals.iter().copied().fold(f64::INFINITY, f64::min)),
++        "max" => Ok(vals.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
++        _ => unreachable!(),
++    }
+ }
+diff --git a/tests/spec.rs b/tests/spec.rs
+new file mode 100644
+index 0000000..2e757a4
+--- /dev/null
++++ b/tests/spec.rs
+@@ -0,0 +1,297 @@
++use calc::{eval, Error};
++use std::collections::HashMap;
++
++fn vars() -> HashMap<String, f64> {
++    HashMap::new()
++}
++
++fn with_vars(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
++    pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
++}
++
++fn ok(src: &str) -> f64 {
++    eval(src, &vars())
++        .unwrap_or_else(|e| panic!("{} failed with {:?}", src, e))
++}
++
++fn ok_vars(src: &str, vars: &HashMap<String, f64>) -> f64 {
++    eval(src, vars)
++        .unwrap_or_else(|e| panic!("{} failed with {:?}", src, e))
++}
++
++fn approx(src: &str, expected: f64) {
++    let got = ok(src);
++    assert!(
++        (got - expected).abs() < 1e-9,
++        "{}: got {}, expected {}",
++        src,
++        got,
++        expected
++    );
++}
++
++fn err(src: &str) -> Error {
++    match eval(src, &vars()) {
++        Ok(v) => panic!("{} unexpectedly succeeded with {}", src, v),
++        Err(e) => e,
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Number literals
++// ---------------------------------------------------------------------------
++
++#[test]
++fn number_literals() {
++    assert_eq!(ok("3"), 3.0);
++    assert_eq!(ok("3.25"), 3.25);
++    assert_eq!(ok(".5"), 0.5);
++    assert_eq!(ok("2e3"), 2000.0);
++    assert_eq!(ok("1.5E-2"), 0.015);
++    assert_eq!(ok("2E+3"), 2000.0);
++    assert_eq!(ok("1e2"), 100.0);
++    assert_eq!(ok("0.1"), 0.1);
++    assert_eq!(ok("10"), 10.0);
++}
++
++// ---------------------------------------------------------------------------
++// Operators, precedence and associativity
++// ---------------------------------------------------------------------------
++
++#[test]
++fn precedence_and_associativity() {
++    assert_eq!(ok("1 + 2 * 3"), 7.0);
++    assert_eq!(ok("2 + 3 * 4"), 14.0);
++    assert_eq!(ok("2 * 3 + 4"), 10.0);
++    assert_eq!(ok("8 / 4"), 2.0);
++    assert_eq!(ok("10 - 3 - 2"), 5.0); // left associative
++    assert_eq!(ok("100 / 10 / 2"), 5.0); // left associative
++    assert_eq!(ok("2 * 6 % 4"), 0.0);
++    assert_eq!(ok("9 % 4 * 3"), 3.0);
++    assert_eq!(ok("10 % 6 % 4"), 0.0);
++}
++
++#[test]
++fn remainder_sign_of_dividend() {
++    assert_eq!(ok("7 % 3"), 1.0);
++    assert_eq!(ok("-7 % 3"), -1.0);
++    assert_eq!(ok("7 % -3"), 1.0);
++    assert_eq!(ok("-7 % -3"), -1.0);
++}
++
++#[test]
++fn unary_signs() {
++    assert_eq!(ok("-2"), -2.0);
++    assert_eq!(ok("+2"), 2.0);
++    assert_eq!(ok("--2"), 2.0);
++    assert_eq!(ok("---2"), -2.0);
++    assert_eq!(ok("+-2"), -2.0);
++    assert_eq!(ok("-+2"), -2.0);
++    assert_eq!(ok("--5 * 2"), 10.0);
++    assert_eq!(ok("1 - -2"), 3.0);
++    assert_eq!(ok("1 - - 2"), 3.0);
++}
++
++#[test]
++fn power() {
++    assert_eq!(ok("-2^2"), -4.0); // ^ binds tighter than unary minus
++    assert_eq!(ok("2^-1"), 0.5); // the exponent is a unary expression
++    assert_eq!(ok("2^3^2"), 512.0); // right associative
++    assert_eq!(ok("-2^2^2"), -16.0); // -(2^(2^2)): unary minus stays outside
++    assert_eq!(ok("2^3*4"), 32.0); // ^ tighter than *
++    assert_eq!(ok("2*3^2"), 18.0);
++    assert_eq!(ok("8/2^3"), 1.0);
++    assert_eq!(ok("2^1/2"), 1.0);
++    approx("2^0.5 * 2^0.5", 2.0);
++    assert_eq!(ok("(-3)^2"), 9.0);
++    assert_eq!(ok("2^(1+1)"), 4.0);
++    approx("4^0.5", 2.0);
++    assert_eq!(ok("2^-2"), 0.25);
++}
++
++#[test]
++fn whitespace_is_ignored() {
++    assert_eq!(ok("  1+2  "), 3.0);
++    assert_eq!(ok("1\t+\n2"), 3.0);
++    assert_eq!(ok("1 - 2 * 3"), -5.0);
++    assert_eq!(ok("(( 1 ))"), 1.0);
++}
++
++// ---------------------------------------------------------------------------
++// Parentheses
++// ---------------------------------------------------------------------------
++
++#[test]
++fn parentheses() {
++    assert_eq!(ok("(1 + 2) * 3"), 9.0);
++    assert_eq!(ok("1 + (2 + 3)"), 6.0);
++    assert_eq!(ok("((1 + 2))"), 3.0);
++    assert_eq!(ok("2 * (3 - (4 - 3))"), 4.0);
++}
++
++// ---------------------------------------------------------------------------
++// Variables
++// ---------------------------------------------------------------------------
++
++#[test]
++fn variables() {
++    let v = with_vars(&[("x", 2.0), ("y", 3.0), ("x1_2", 5.0), ("_", -1.0)]);
++    assert_eq!(ok_vars("x * y", &v), 6.0);
++    assert_eq!(ok_vars("x + x", &v), 4.0);
++    assert_eq!(ok_vars("x1_2 + x", &v), 7.0);
++    assert_eq!(ok_vars("_", &v), -1.0);
++    assert_eq!(ok_vars("-x", &v), -2.0);
++    assert_eq!(ok_vars("max(x, y) * x1_2", &v), 15.0);
++    // an identifier not followed by '(' is a variable, even if it looks like a function
++    let v2 = with_vars(&[("sqrt", 9.0)]);
++    assert_eq!(ok_vars("sqrt", &v2), 9.0);
++}
++
++// ---------------------------------------------------------------------------
++// Functions
++// ---------------------------------------------------------------------------
++
++#[test]
++fn functions() {
++    assert_eq!(ok("abs(-5)"), 5.0);
++    assert_eq!(ok("abs(3 - 10)"), 7.0);
++    assert_eq!(ok("sqrt(16)"), 4.0);
++    approx("sqrt(2) * sqrt(2)", 2.0);
++    assert_eq!(ok("min(1, 2)"), 1.0);
++    assert_eq!(ok("max(1, 2)"), 2.0);
++    assert_eq!(ok("min(3)"), 3.0);
++    assert_eq!(ok("max(5)"), 5.0);
++    assert_eq!(ok("min(1, 2, 3, 4)"), 1.0);
++    assert_eq!(ok("max(4, 3, 2, 1)"), 4.0);
++    assert_eq!(ok("min(-1, -2)"), -2.0);
++    assert_eq!(ok("max(-1, -2)"), -1.0);
++    assert_eq!(ok("abs(sqrt(16))"), 4.0);
++    assert_eq!(ok("max(min(1, 2), 3)"), 3.0);
++    assert_eq!(ok("min( ( 1 ), 2 )"), 1.0);
++    assert_eq!(ok("-abs(-3)"), -3.0);
++    assert_eq!(ok("min(-1, 2)"), -1.0);
++    assert_eq!(ok_vars("max(x, 1) + y", &with_vars(&[("x", 2.0), ("y", 10.0)])), 12.0);
++}
++
++// ---------------------------------------------------------------------------
++// Errors: UnexpectedChar
++// ---------------------------------------------------------------------------
++
++#[test]
++fn unexpected_char() {
++    assert_eq!(err("2 $ 3"), Error::UnexpectedChar(2));
++    assert_eq!(err("#5"), Error::UnexpectedChar(0));
++    assert_eq!(err("2 & 3"), Error::UnexpectedChar(2));
++    assert_eq!(err("1 @"), Error::UnexpectedChar(2));
++    assert_eq!(err("."), Error::UnexpectedChar(0));
++    // a later bad char does not shadow an earlier parse error
++    assert_eq!(err(") $"), Error::UnexpectedToken(0));
++}
++
++// ---------------------------------------------------------------------------
++// Errors: UnexpectedEnd
++// ---------------------------------------------------------------------------
++
++#[test]
++fn unexpected_end() {
++    assert_eq!(err(""), Error::UnexpectedEnd);
++    assert_eq!(err("   "), Error::UnexpectedEnd);
++    assert_eq!(err("2 +"), Error::UnexpectedEnd);
++    assert_eq!(err("2 *"), Error::UnexpectedEnd);
++    assert_eq!(err("2 ^"), Error::UnexpectedEnd);
++    assert_eq!(err("(1"), Error::UnexpectedEnd);
++    assert_eq!(err("("), Error::UnexpectedEnd);
++    assert_eq!(err("min(1,"), Error::UnexpectedEnd);
++    assert_eq!(err("abs("), Error::UnexpectedEnd);
++    assert_eq!(err("1 + ("), Error::UnexpectedEnd);
++    assert_eq!(err("-"), Error::UnexpectedEnd);
++    assert_eq!(err("1 + 2 *"), Error::UnexpectedEnd);
++}
++
++// ---------------------------------------------------------------------------
++// Errors: UnexpectedToken
++// ---------------------------------------------------------------------------
++
++#[test]
++fn unexpected_token() {
++    assert_eq!(err("2 3"), Error::UnexpectedToken(2));
++    assert_eq!(err(")"), Error::UnexpectedToken(0));
++    assert_eq!(err("(1))"), Error::UnexpectedToken(3));
++    assert_eq!(err(") 1"), Error::UnexpectedToken(0));
++    assert_eq!(err("1 + 2 3"), Error::UnexpectedToken(6));
++    assert_eq!(err("1 2 + 3"), Error::UnexpectedToken(2));
++    assert_eq!(err("((1)) 2"), Error::UnexpectedToken(6));
++    assert_eq!(err("1 (2)"), Error::UnexpectedToken(2));
++    assert_eq!(err("2 + 3)"), Error::UnexpectedToken(5));
++    // a trailing comma means a `)` where an expression was expected
++    assert_eq!(err("min(1,)"), Error::UnexpectedToken(6));
++    assert_eq!(err("min(1,,2)"), Error::UnexpectedToken(6));
++}
++
++// ---------------------------------------------------------------------------
++// Errors: evaluation (after the whole input has parsed)
++// ---------------------------------------------------------------------------
++
++#[test]
++fn unknown_variable() {
++    assert_eq!(err("z"), Error::UnknownVariable("z".into()));
++    assert_eq!(err("1 + z * 2"), Error::UnknownVariable("z".into()));
++    assert_eq!(err("min(z, 1)"), Error::UnknownVariable("z".into()));
++    // a function name used without '(' is just a variable
++    assert_eq!(err("abs"), Error::UnknownVariable("abs".into()));
++}
++
++#[test]
++fn unknown_function() {
++    assert_eq!(err("foo(1)"), Error::UnknownFunction("foo".into()));
++    assert_eq!(err("foo()"), Error::UnknownFunction("foo".into()));
++    assert_eq!(err("min(1) + foo(2)"), Error::UnknownFunction("foo".into()));
++}
++
++#[test]
++fn arity() {
++    assert_eq!(err("abs()"), Error::Arity("abs".into(), 0));
++    assert_eq!(err("abs(1, 2)"), Error::Arity("abs".into(), 2));
++    assert_eq!(err("sqrt()"), Error::Arity("sqrt".into(), 0));
++    assert_eq!(err("sqrt(1, 2, 3)"), Error::Arity("sqrt".into(), 3));
++    assert_eq!(err("min()"), Error::Arity("min".into(), 0));
++    assert_eq!(err("max()"), Error::Arity("max".into(), 0));
++    assert_eq!(ok("min(1)"), 1.0); // sanity: 1 arg is fine
++}
++
++#[test]
++fn division_by_zero() {
++    assert_eq!(err("1 / 0"), Error::DivisionByZero);
++    assert_eq!(err("0 / 0"), Error::DivisionByZero);
++    assert_eq!(err("5 % 0"), Error::DivisionByZero);
++    assert_eq!(err("1 / (2 - 2)"), Error::DivisionByZero);
++    assert_eq!(ok("1 / 2.0"), 0.5); // non-zero divisor is fine
++    assert_eq!(ok("7 % 2"), 1.0);
++}
++
++// ---------------------------------------------------------------------------
++// Error ordering: parse errors first (left to right), then evaluation
++// ---------------------------------------------------------------------------
++
++#[test]
++fn error_ordering() {
++    // parse error at 0 wins over tokenization error at 2
++    assert_eq!(err(") $"), Error::UnexpectedToken(0));
++    // parse error before a later bad character
++    assert_eq!(err("2 3 $"), Error::UnexpectedToken(2));
++    // parse errors are reported before evaluation errors, even when the
++    // evaluation error textually comes first
++    assert_eq!(err("1 / 0 2"), Error::UnexpectedToken(6));
++    // `z (1` parses as the call `z(1` and ends early (like `min(1,`), so the
++    // parse error beats the `UnknownFunction("z")` that eval would report
++    assert_eq!(err("z (1"), Error::UnexpectedEnd);
++    // among evaluation errors, the leftmost is reported
++    assert_eq!(err("z + 1 / 0"), Error::UnknownVariable("z".into()));
++    assert_eq!(err("1 / 0 + z"), Error::DivisionByZero);
++    assert_eq!(err("min(1 / 0, 5)"), Error::DivisionByZero);
++    assert_eq!(err("min(1, 2) / 0"), Error::DivisionByZero);
++    // arity at the call site is left of anything inside the arguments
++    assert_eq!(err("abs(1 / 0, 2)"), Error::Arity("abs".into(), 2));
++    // unknown variable inside a well-arity'd call
++    assert_eq!(err("abs(z)"), Error::UnknownVariable("z".into()));
++}

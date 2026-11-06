@@ -1,0 +1,8 @@
+{
+  "name": "tinycsv",
+  "version": "0.3.0",
+  "description": "RFC 4180 CSV parsing and writing",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": { "test": "node --test" }
+}

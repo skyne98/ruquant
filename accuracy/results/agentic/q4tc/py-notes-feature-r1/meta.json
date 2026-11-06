@@ -1,0 +1,32 @@
+{
+ "label": "q4tc",
+ "task": "py-notes-feature",
+ "rep": 1,
+ "model": "llamacpp/qwen3.8-27b-w4a4",
+ "turns": [
+  {
+   "turn": 1,
+   "status": "ok",
+   "seconds": 103.7
+  }
+ ],
+ "started": 1793977310.4670262,
+ "session": "ses_e4e9ea1d3ffenKPp2HiJvqmr5g",
+ "seconds": 103.7,
+ "hidden": {
+  "passed": 10,
+  "failed": 0,
+  "errors": 0,
+  "rc": 0,
+  "ok": true,
+  "seconds": 0.2
+ },
+ "suite": {
+  "passed": 10,
+  "failed": 0,
+  "errors": 0,
+  "rc": 0,
+  "ok": true,
+  "seconds": 0.2
+ }
+}

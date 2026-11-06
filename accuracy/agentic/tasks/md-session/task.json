@@ -1,0 +1,1 @@
+{"hidden": "python -m pytest -q -p no:cacheprovider {stage_files}", "stage_files": "tests/test_hidden_s{k}.py", "suite": "python -m pytest -q -p no:cacheprovider"}

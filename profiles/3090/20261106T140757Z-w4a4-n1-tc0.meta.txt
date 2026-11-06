@@ -1,0 +1,12 @@
+label: w4a4-n1-tc0
+time: 2026-11-06T14:07:57Z
+host: fox-workstation
+gpu: NVIDIA GeForce RTX 3090 (driver 595.112.07)
+command: build-llama/build/bin/test-backend-ops perf -o MUL_MAT -b CUDA0 -p type_a=w4a4,type_b=f32,m=17408,n=1,
+settings: RQ_TC=0
+binary: build-llama/build/bin/test-backend-ops
+libggml-cuda.so md5: 315c4a6120a18069b77377cb58ff17ff
+environment:
+  LD_LIBRARY_PATH=/run/opengl-driver/lib:/nix/store/w36w2725s1sx6bscgz2sdq56q654y2d5-pipewire-1.6.9-jack/lib
+tool: nsys profile --trace=cuda --stats=true
+exit: 0

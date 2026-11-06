@@ -1,0 +1,27 @@
+$ node --test test/hidden.test.js test/orig.test.js
+✔ hidden: last record without line break keeps an empty last field (1.035287ms)
+✔ hidden: empty quoted field at the end (0.100128ms)
+✔ hidden: escaped quotes in the middle, CRLF (0.062167ms)
+✔ hidden: CRLF inside quotes is kept (0.049433ms)
+✔ hidden: no trailing line break (0.055985ms)
+✔ hidden: other delimiter (0.155443ms)
+✔ hidden: unterminated quote on a later line (0.231936ms)
+✔ hidden: empty input (0.05343ms)
+✔ simple records (1.048451ms)
+✔ quoted delimiter and newline (0.092204ms)
+✔ escaped quotes (0.062647ms)
+✔ CRLF line endings (0.059632ms)
+✔ empty trailing field (0.055074ms)
+✔ unterminated quote reports the line where it starts (0.217228ms)
+✔ round trip (0.152186ms)
+✔ objects (0.121038ms)
+ℹ tests 16
+ℹ suites 0
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 35.265233
+
+[exit 0]

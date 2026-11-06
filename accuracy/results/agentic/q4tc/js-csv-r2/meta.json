@@ -1,0 +1,32 @@
+{
+ "label": "q4tc",
+ "task": "js-csv",
+ "rep": 2,
+ "model": "llamacpp/qwen3.8-27b-w4a4",
+ "turns": [
+  {
+   "turn": 1,
+   "status": "ok",
+   "seconds": 218.1
+  }
+ ],
+ "started": 1793978399.8488834,
+ "session": "ses_e4e8e027cffetp2CtullKVe5Cc",
+ "seconds": 218.1,
+ "hidden": {
+  "passed": 16,
+  "failed": 0,
+  "errors": 0,
+  "rc": 0,
+  "ok": true,
+  "seconds": 0.1
+ },
+ "suite": {
+  "passed": 20,
+  "failed": 0,
+  "errors": 0,
+  "rc": 0,
+  "ok": true,
+  "seconds": 0.1
+ }
+}

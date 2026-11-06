@@ -1,0 +1,41 @@
+$ cargo test --offline
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (target/debug/deps/lru-c7ec27311f3348c2)
+
+running 18 tests
+test tests::capacity_one ... ok
+test tests::clear ... ok
+test tests::empty_cache ... ok
+test tests::eviction_is_least_recently_used ... ok
+test tests::get_mut_refreshes_order_and_mutates ... ok
+test tests::get_refreshes_order ... ok
+test tests::iter_does_not_change_order ... ok
+test tests::iter_mru_to_lru_and_values ... ok
+test tests::order_after_mixed_ops ... ok
+test tests::new_zero_panics - should panic ... ok
+test tests::peek_does_not_refresh_order ... ok
+test tests::pop_lru ... ok
+test tests::put_get_peek ... ok
+test tests::long_sequence_stays_consistent ... ok
+test tests::put_replaces_existing_without_evicting ... ok
+test tests::remove_frees_capacity ... ok
+test tests::resize_down_evicts_lru ... ok
+test tests::resize_zero_panics - should panic ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/basic.rs (target/debug/deps/basic-c4186c84c235defb)
+
+running 1 test
+test put_get ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests lru
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+[exit 0]

@@ -1,0 +1,1002 @@
+ mdlite/__init__.py   | 308 +++++++++++++++++++++++++
+ mdlite/__main__.py   |  34 +++
+ tests/test_mdlite.py | 637 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 979 insertions(+)
+
+diff --git a/mdlite/__init__.py b/mdlite/__init__.py
+new file mode 100644
+index 0000000..a97e8c8
+--- /dev/null
++++ b/mdlite/__init__.py
+@@ -0,0 +1,308 @@
++"""mdlite: a small Markdown-to-HTML converter.
++
++It converts a small subset of Markdown to HTML:
++
++* A blank line (empty or only whitespace) separates blocks.
++* A line starting with 1 to 6 ``#`` characters followed by a space is an
++  ATX heading, e.g. ``## Some title`` -> ``<h2>Some title</h2>``.  A
++  heading is always a block of its own, even without blank lines around
++  it.  ``#Title`` (no space) and seven or more ``#`` are ordinary text.
++* Lines starting with ``- `` or ``* `` are unordered list items and lines
++  starting with a number, a dot, and a space (``1. ``, ``10. ``) are
++  ordered list items.  Consecutive items of the same kind form one
++  ``<ul>`` or ``<ol>`` block; the list ends at a blank line, at an item
++  of the other kind, or at a line that is not an item (which starts a new
++  paragraph).  An item line also ends a pending paragraph.
++* A line that is ```` ``` ```` (optionally followed by a language) opens
++  a fenced code block; the next line that is exactly ```` ``` ```` closes
++  it.  The lines in between are emitted verbatim -- escaped, but not
++  formatted, indentation kept -- inside ``<pre><code>``.
++* Any other run of consecutive non-blank lines is a paragraph: each line
++  is stripped and the lines are joined with a single space.
++* Inline, inside headings, list items and paragraphs:
++  ``**bold**`` -> ``<strong>``, ``*italic*`` -> ``<em>``, and
++  `` `code` `` -> ``<code>``.  A code span is escaped but never
++  formatted; an opening ``*`` or ``**`` must be followed by a non-space
++  character and the closing marker must be preceded by one.
++* ``[text](url)`` is a link: ``<a href="url">text</a>``.  Inline
++  formatting applies to the text; in the URL ``&`` is escaped to
++  ``&amp;`` and ``"`` to ``&quot;``.  Nothing inside a code span becomes
++  a link.
++* ``&``, ``<`` and ``>`` in text are escaped to ``&amp;``, ``&lt;`` and
++  ``&gt;``.
++* The output is the block elements joined with ``\\n`` and has no
++  trailing newline; empty input gives ``""``.
++"""
++
++from __future__ import annotations
++
++import re
++
++__all__ = ["to_html"]
++
++# 1 to 6 '#' characters followed by a space; the rest is the title.
++_HEADING = re.compile(r"^(#{1,6}) (.*)$")
++
++# A line starting with '- ' or '* ' is an unordered list item.
++_UL_ITEM = re.compile(r"^[-*] (.*)$")
++
++# A line starting with one or more digits, a dot, and a space is an
++# ordered list item; the number itself is discarded.
++_OL_ITEM = re.compile(r"^[0-9]+\. (.*)$")
++
++# A fence line: three backticks, optionally followed by a language.
++_FENCE = re.compile(r"^```\s*(\S.*)?$")
++
++
++def _escape(text: str) -> str:
++    """Escape the HTML metacharacters ``&``, ``<`` and ``>``.
++
++    ``&`` is escaped first so that characters escaped later are not
++    double-escaped.
++    """
++    return (
++        text.replace("&", "&amp;")
++        .replace("<", "&lt;")
++        .replace(">", "&gt;")
++    )
++
++
++def _non_space(text: str, idx: int) -> bool:
++    """True if ``text[idx]`` exists and is not a whitespace character."""
++    return idx >= 0 and not text[idx].isspace()
++
++
++def _past_code_span(text: str, i: int) -> int:
++    """Index just past the code span opened at *i*, else *i* + 1.
++
++    ``text[i]`` is a backtick.  Code spans are paired left to right:
++    each backtick pairs with the next one.  An unpaired backtick is
++    literal text, so the result is simply *i* + 1.
++    """
++    j = text.find("`", i + 1)
++    return j + 1 if j != -1 else i + 1
++
++
++def _find_close(text: str, start: int, double: bool) -> int:
++    """Index of the first valid closing marker at or after *start*, else -1.
++
++    A closing marker is ``*`` (or ``**`` when *double*) preceded by a
++    non-space character.  Code spans are skipped, so a ``*`` inside a
++    code span can never close an emphasis span.
++    """
++    n = len(text)
++    j = start
++    while j < n:
++        if text[j] == "`":
++            j = _past_code_span(text, j)
++            continue
++        if text[j] == "*":
++            if double:
++                if (
++                    j + 1 < n
++                    and text[j + 1] == "*"
++                    and _non_space(text, j - 1)
++                ):
++                    return j
++            elif _non_space(text, j - 1):
++                return j
++        j += 1
++    return -1
++
++
++def _find_link(text: str, i: int) -> tuple[str, str, int] | None:
++    """Match a ``[text](url)`` link opened at *i*, where ``text[i] == "["``.
++
++    Returns ``(link_text, url, end)`` where *end* is the index just past
++    the closing parenthesis, or None.  Code spans are skipped while
++    scanning, so neither link markers nor brackets inside code spans can
++    take part in a link.
++    """
++    n = len(text)
++    j = i + 1
++    while j < n:
++        if text[j] == "`":
++            j = _past_code_span(text, j)
++            continue
++        if text[j] == "]" and j + 1 < n and text[j + 1] == "(":
++            k = j + 2
++            while k < n:
++                if text[k] == "`":
++                    k = _past_code_span(text, k)
++                    continue
++                if text[k] == ")":
++                    return text[i + 1:j], text[j + 2:k], k + 1
++                k += 1
++        j += 1
++    return None
++
++
++def _escape_url(url: str) -> str:
++    """Escape an ``href`` attribute: ``&`` and ``"`` only."""
++    return url.replace("&", "&amp;").replace('"', "&quot;")
++
++
++def _inline(text: str) -> str:
++    """Render the inline formatting of *text* as HTML.
++
++    Scans left to right, formatting code spans, ``[text](url)`` links,
++    ``**bold**`` and ``*italic*``.  A code span's content is escaped but
++    never formatted; the content of a link or an emphasis span is
++    processed recursively, so the syntaxes can nest.  An opening ``*``
++    or ``**`` must be followed by a non-space character and the matching
++    closing marker must be preceded by one; markers without a partner
++    are left as literal text.
++    """
++    out: list[str] = []
++    i = 0
++    n = len(text)
++    while i < n:
++        c = text[i]
++        if c == "`":
++            j = text.find("`", i + 1)
++            if j == -1:
++                out.append("`")
++                i += 1
++                continue
++            out.append(f"<code>{_escape(text[i + 1:j])}</code>")
++            i = j + 1
++            continue
++        if c == "[":
++            link = _find_link(text, i)
++            if link is not None:
++                span, url, end = link
++                out.append(
++                    f'<a href="{_escape_url(url)}">'
++                    f"{_inline(span)}</a>"
++                )
++                i = end
++                continue
++            out.append("[")
++            i += 1
++            continue
++        if c == "*" and i + 1 < n and text[i + 1] == "*":
++            if i + 2 < n and not text[i + 2].isspace():
++                j = _find_close(text, i + 2, True)
++                if j != -1:
++                    out.append(
++                        "<strong>" + _inline(text[i + 2:j]) + "</strong>"
++                    )
++                    i = j + 2
++                    continue
++            # No valid bold pair: leave one star literal and move on.
++            out.append("*")
++            i += 1
++            continue
++        if c == "*" and i + 1 < n and not text[i + 1].isspace():
++            j = _find_close(text, i + 1, False)
++            if j != -1:
++                out.append("<em>" + _inline(text[i + 1:j]) + "</em>")
++                i = j + 1
++                continue
++        out.append(_escape(c))
++        i += 1
++    return "".join(out)
++
++
++def to_html(text: str) -> str:
++    """Convert the Markdown-ish *text* to a string of HTML blocks.
++
++    Blocks are separated by ``\\n`` and the result has no trailing
++    newline.  Empty or blank-only input gives ``""``.
++    """
++    blocks: list[str] = []
++    paragraph: list[str] = []
++    list_kind: str | None = None
++    list_items: list[str] = []
++    code_block: list[str] | None = None
++    code_lang = ""
++
++    def flush_paragraph() -> None:
++        if paragraph:
++            blocks.append(f"<p>{_inline(' '.join(paragraph))}</p>")
++            paragraph.clear()
++
++    def flush_list() -> None:
++        nonlocal list_kind
++        if list_kind is not None:
++            items = "\n".join(
++                f"<li>{_inline(item)}</li>" for item in list_items
++            )
++            tag = list_kind
++            blocks.append(f"<{tag}>\n{items}\n</{tag}>")
++            list_kind = None
++            list_items.clear()
++
++    def flush_code() -> None:
++        nonlocal code_block
++        if code_block is not None:
++            content = "\n".join(_escape(line) for line in code_block)
++            if code_lang:
++                blocks.append(
++                    f'<pre><code class="language-{code_lang}">'
++                    f"{content}</code></pre>"
++                )
++            else:
++                blocks.append(f"<pre><code>{content}</code></pre>")
++            code_block = None
++
++    for raw_line in text.splitlines():
++        stripped = raw_line.strip()
++
++        # Inside a fenced code block everything is literal, blank lines
++        # included; only a line that is exactly ``` closes the block.
++        if code_block is not None:
++            if stripped == "```":
++                flush_code()
++            else:
++                code_block.append(raw_line)
++            continue
++
++        fence = _FENCE.match(stripped)
++        if fence is not None:
++            # A fence ends any pending paragraph or list and opens a
++            # code block.
++            flush_paragraph()
++            flush_list()
++            code_lang = fence.group(1) or ""
++            code_block = []
++            continue
++
++        # Heading detection is positional (the line must *start* with the
++        # hashes), so it runs on the raw line, before any stripping.
++        match = _HEADING.match(raw_line)
++        if match is not None:
++            # A heading is a block of its own and ends any pending
++            # paragraph or list.
++            flush_paragraph()
++            flush_list()
++            level = len(match.group(1))
++            title = match.group(2).strip()
++            blocks.append(f"<h{level}>{_inline(title)}</h{level}>")
++            continue
++
++        m_ul = _UL_ITEM.match(raw_line)
++        m_ol = _OL_ITEM.match(raw_line)
++        if m_ul is not None or m_ol is not None:
++            # An item line ends a pending paragraph; an item of the other
++            # kind ends the current list and starts a new one.
++            flush_paragraph()
++            kind = "ul" if m_ul is not None else "ol"
++            if list_kind != kind:
++                flush_list()
++                list_kind = kind
++            list_items.append((m_ul or m_ol).group(1).strip())
++            continue
++
++        # Any other line ends the current list, if there is one.
++        flush_list()
++        if stripped:
++            paragraph.append(stripped)
++        else:
++            # Blank line: close the current paragraph, if any.
++            flush_paragraph()
++
++    flush_paragraph()
++    flush_list()
++    flush_code()
++    return "\n".join(blocks)
+diff --git a/mdlite/__main__.py b/mdlite/__main__.py
+new file mode 100644
+index 0000000..4a1be81
+--- /dev/null
++++ b/mdlite/__main__.py
+@@ -0,0 +1,34 @@
++"""Command line interface: ``python -m mdlite [FILE]``.
++
++Prints the HTML for *FILE* -- or for all of standard input when no
++argument is given -- followed by a newline.
++"""
++
++from __future__ import annotations
++
++import sys
++
++from mdlite import to_html
++
++
++def main() -> int:
++    """Convert the file (or stdin) given on the command line."""
++    args = sys.argv[1:]
++    if len(args) > 1:
++        print("usage: python -m mdlite [FILE]", file=sys.stderr)
++        return 2
++    try:
++        if args:
++            with open(args[0], "r", encoding="utf-8") as fh:
++                text = fh.read()
++        else:
++            text = sys.stdin.read()
++    except OSError as exc:
++        print(f"mdlite: {exc}", file=sys.stderr)
++        return 1
++    print(to_html(text))
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/test_mdlite.py b/tests/test_mdlite.py
+new file mode 100644
+index 0000000..40b9818
+--- /dev/null
++++ b/tests/test_mdlite.py
+@@ -0,0 +1,637 @@
++"""Tests for the mdlite Markdown-to-HTML converter."""
++
++import subprocess
++import sys
++from pathlib import Path
++
++import pytest
++
++from mdlite import to_html
++
++# The repository root, so that ``python -m mdlite`` finds the package
++# regardless of where pytest is invoked from.
++REPO_ROOT = Path(__file__).resolve().parent.parent
++
++
++# ---------------------------------------------------------------------------
++# Empty input
++# ---------------------------------------------------------------------------
++
++def test_empty_input_gives_empty_output():
++    assert to_html("") == ""
++
++
++def test_blank_only_input_gives_empty_output():
++    assert to_html("   \n\n  \n") == ""
++
++
++# ---------------------------------------------------------------------------
++# Paragraphs
++# ---------------------------------------------------------------------------
++
++def test_single_line_paragraph():
++    assert to_html("Hello world") == "<p>Hello world</p>"
++
++
++def test_multiline_paragraph_joins_lines_with_single_space():
++    assert to_html("Some\ntext") == "<p>Some text</p>"
++
++
++def test_paragraph_lines_are_stripped_before_joining():
++    assert to_html("  Hello   \n  world  ") == "<p>Hello world</p>"
++
++
++def test_blank_line_separates_paragraphs():
++    assert to_html("A\n\nB") == "<p>A</p>\n<p>B</p>"
++
++
++def test_whitespace_only_line_separates_blocks():
++    assert to_html("A\n   \nB") == "<p>A</p>\n<p>B</p>"
++
++
++def test_multiple_blank_lines_act_as_one_separator():
++    assert to_html("A\n\n\n\nB") == "<p>A</p>\n<p>B</p>"
++
++
++def test_trailing_newline_does_not_create_an_extra_block():
++    assert to_html("Hello\n") == "<p>Hello</p>"
++
++
++# ---------------------------------------------------------------------------
++# Headings
++# ---------------------------------------------------------------------------
++
++def test_heading_basics():
++    assert to_html("# Title") == "<h1>Title</h1>"
++
++
++@pytest.mark.parametrize(
++    ("text", "level"),
++    [
++        ("# A", 1),
++        ("## A", 2),
++        ("### A", 3),
++        ("#### A", 4),
++        ("##### A", 5),
++        ("###### A", 6),
++    ],
++)
++def test_heading_levels(text, level):
++    assert to_html(text) == f"<h{level}>A</h{level}>"
++
++
++def test_seven_hashes_is_not_a_heading():
++    assert to_html("####### X") == "<p>####### X</p>"
++
++
++def test_hash_without_space_is_not_a_heading():
++    assert to_html("#Title") == "<p>#Title</p>"
++
++
++def test_lone_hash_is_text():
++    assert to_html("#") == "<p>#</p>"
++
++
++def test_heading_with_empty_title():
++    assert to_html("# ") == "<h1></h1>"
++
++
++def test_heading_title_is_stripped():
++    assert to_html("##  Spaced  out  ") == "<h2>Spaced  out</h2>"
++
++
++def test_heading_is_a_block_of_its_own_before_a_paragraph():
++    assert to_html("# A\nText") == "<h1>A</h1>\n<p>Text</p>"
++
++
++def test_heading_is_a_block_of_its_own_after_a_paragraph():
++    assert to_html("Text\n# A") == "<p>Text</p>\n<h1>A</h1>"
++
++
++def test_heading_between_paragraphs_without_blank_lines():
++    assert to_html("A\n# H\nB") == "<p>A</p>\n<h1>H</h1>\n<p>B</p>"
++
++
++def test_consecutive_headings_are_separate_blocks():
++    assert to_html("# A\n## B") == "<h1>A</h1>\n<h2>B</h2>"
++
++
++def test_indented_hash_line_is_text():
++    # A heading must *start* with the hashes, so an indented "# X" is
++    # ordinary text (stripped into the paragraph).
++    assert to_html("  # X") == "<p># X</p>"
++
++
++# ---------------------------------------------------------------------------
++# Escaping
++# ---------------------------------------------------------------------------
++
++def test_ampersand_is_escaped():
++    assert to_html("Tom & Jerry") == "<p>Tom &amp; Jerry</p>"
++
++
++def test_angle_brackets_are_escaped():
++    assert to_html("a < b > c") == "<p>a &lt; b &gt; c</p>"
++
++
++def test_all_special_characters_escaped():
++    assert to_html("&<>") == "<p>&amp;&lt;&gt;</p>"
++
++
++def test_ampersand_is_escaped_before_the_others():
++    # A literal "&lt;" in the text must become "&amp;lt;", not "&lt;".
++    assert to_html("a &lt; b") == "<p>a &amp;lt; b</p>"
++
++
++def test_heading_text_is_escaped():
++    assert to_html("# A < B & C") == "<h1>A &lt; B &amp; C</h1>"
++
++
++# ---------------------------------------------------------------------------
++# Combined behaviour
++# ---------------------------------------------------------------------------
++
++def test_spec_example():
++    assert (
++        to_html("# Title\nSome\ntext\n\nMore")
++        == "<h1>Title</h1>\n<p>Some text</p>\n<p>More</p>"
++    )
++
++
++def test_mixed_document():
++    text = "### Deep\n\n# One\n#Two\n\n####### Seven\n\nplain & <line>"
++    expected = (
++        "<h3>Deep</h3>\n"
++        "<h1>One</h1>\n"
++        "<p>#Two</p>\n"
++        "<p>####### Seven</p>\n"
++        "<p>plain &amp; &lt;line&gt;</p>"
++    )
++    assert to_html(text) == expected
++
++
++def test_output_has_no_trailing_newline():
++    assert not to_html("A\n\nB").endswith("\n")
++    assert to_html("A\n\nB") == "<p>A</p>\n<p>B</p>"
++
++
++# ---------------------------------------------------------------------------
++# Inline formatting
++# ---------------------------------------------------------------------------
++
++def test_bold():
++    assert to_html("**bold**") == "<p><strong>bold</strong></p>"
++
++
++def test_italic():
++    assert to_html("*italic*") == "<p><em>italic</em></p>"
++
++
++def test_code_span():
++    assert to_html("`code`") == "<p><code>code</code></p>"
++
++
++def test_bold_italic_code_in_one_paragraph():
++    assert (
++        to_html("a **b** and *c* and `d`")
++        == "<p>a <strong>b</strong> and <em>c</em> and <code>d</code></p>"
++    )
++
++
++def test_code_span_is_escaped_but_not_formatted():
++    assert (
++        to_html("a `x * y & z` b")
++        == "<p>a <code>x * y &amp; z</code> b</p>"
++    )
++
++
++def test_markers_inside_code_span_stay_literal():
++    assert to_html("`*not em*`") == "<p><code>*not em*</code></p>"
++
++
++def test_code_span_with_special_characters():
++    assert to_html("`a < b & c`") == "<p><code>a &lt; b &amp; c</code></p>"
++
++
++def test_multiple_code_spans():
++    assert to_html("`a` `b`") == "<p><code>a</code> <code>b</code></p>"
++
++
++def test_unpaired_backtick_is_literal():
++    assert to_html("a ` b") == "<p>a ` b</p>"
++
++
++def test_markers_with_spaces_stay_literal():
++    # Spec example: no valid opening/closing markers here.
++    assert to_html("2 * 3 * 4") == "<p>2 * 3 * 4</p>"
++
++
++def test_opening_marker_followed_by_space_is_literal():
++    # A line *starting* with "* " is a list item, so the rule is tested
++    # mid-line here.
++    assert to_html("a * word*") == "<p>a * word*</p>"
++
++
++def test_closing_marker_must_be_preceded_by_non_space():
++    # The " *" after "b" cannot close; the final "*" can.
++    assert to_html("a *b * c*") == "<p>a <em>b * c</em></p>"
++
++
++def test_unpaired_markers_stay_literal():
++    assert to_html("*unpaired") == "<p>*unpaired</p>"
++    assert to_html("unpaired*") == "<p>unpaired*</p>"
++    assert to_html("**unpaired") == "<p>**unpaired</p>"
++    assert to_html("unpaired**") == "<p>unpaired**</p>"
++
++
++def test_bold_with_special_characters():
++    assert to_html("**a & b**") == "<p><strong>a &amp; b</strong></p>"
++
++
++def test_italic_in_heading():
++    assert to_html("# *em* title") == "<h1><em>em</em> title</h1>"
++
++
++def test_code_span_in_heading():
++    assert to_html("# `code` title") == "<h1><code>code</code> title</h1>"
++
++
++def test_bold_and_code_in_one_line():
++    assert (
++        to_html("**bold** and `c * d`")
++        == "<p><strong>bold</strong> and <code>c * d</code></p>"
++    )
++
++
++# ---------------------------------------------------------------------------
++# Lists
++# ---------------------------------------------------------------------------
++
++def test_unordered_list_basics():
++    assert (
++        to_html("- a\n- b")
++        == "<ul>\n<li>a</li>\n<li>b</li>\n</ul>"
++    )
++
++
++def test_star_marker_gives_unordered_list():
++    assert (
++        to_html("* a\n* b")
++        == "<ul>\n<li>a</li>\n<li>b</li>\n</ul>"
++    )
++
++
++def test_ordered_list_basics():
++    assert (
++        to_html("1. a\n2. b")
++        == "<ol>\n<li>a</li>\n<li>b</li>\n</ol>"
++    )
++
++
++def test_ordered_list_numbers_are_discarded():
++    assert (
++        to_html("10. x\n11. y")
++        == "<ol>\n<li>x</li>\n<li>y</li>\n</ol>"
++    )
++
++
++def test_single_item_list():
++    assert to_html("- a") == "<ul>\n<li>a</li>\n</ul>"
++    assert to_html("1. a") == "<ol>\n<li>a</li>\n</ol>"
++
++
++def test_list_items_apply_inline_formatting():
++    assert (
++        to_html("- **bold** and *em* and `code`")
++        == "<ul>\n<li><strong>bold</strong> and <em>em</em>"
++        " and <code>code</code></li>\n</ul>"
++    )
++
++
++def test_list_items_are_escaped():
++    assert (
++        to_html("- a & b < c")
++        == "<ul>\n<li>a &amp; b &lt; c</li>\n</ul>"
++    )
++
++
++def test_list_item_text_is_stripped():
++    assert to_html("-  spaced  ") == "<ul>\n<li>spaced</li>\n</ul>"
++
++
++def test_blank_line_splits_lists():
++    assert (
++        to_html("- a\n\n- b")
++        == "<ul>\n<li>a</li>\n</ul>\n<ul>\n<li>b</li>\n</ul>"
++    )
++
++
++def test_non_item_line_ends_list_and_starts_paragraph():
++    assert (
++        to_html("- a\ntext")
++        == "<ul>\n<li>a</li>\n</ul>\n<p>text</p>"
++    )
++
++
++def test_item_line_ends_paragraph_before_it():
++    assert (
++        to_html("text\n- a")
++        == "<p>text</p>\n<ul>\n<li>a</li>\n</ul>"
++    )
++
++
++def test_item_of_other_kind_splits_the_list():
++    assert (
++        to_html("- a\n1. b")
++        == "<ul>\n<li>a</li>\n</ul>\n<ol>\n<li>b</li>\n</ol>"
++    )
++    assert (
++        to_html("1. a\n- b")
++        == "<ol>\n<li>a</li>\n</ol>\n<ul>\n<li>b</li>\n</ul>"
++    )
++
++
++def test_heading_ends_list():
++    assert (
++        to_html("- a\n# H")
++        == "<ul>\n<li>a</li>\n</ul>\n<h1>H</h1>"
++    )
++
++
++def test_dash_without_space_is_not_an_item():
++    assert to_html("-x") == "<p>-x</p>"
++
++
++def test_star_without_space_is_not_an_item():
++    # "*x*" does not start with "* " (no space), so it is a paragraph
++    # with inline emphasis.
++    assert to_html("*x*") == "<p><em>x</em></p>"
++
++
++def test_number_dot_without_space_is_not_an_item():
++    assert to_html("1.5") == "<p>1.5</p>"
++    assert to_html("1.") == "<p>1.</p>"
++
++
++def test_indented_item_line_is_text():
++    # Item detection is positional, like heading detection.
++    assert to_html("  - a") == "<p>- a</p>"
++
++
++def test_empty_list_item():
++    assert to_html("- ") == "<ul>\n<li></li>\n</ul>"
++
++
++# ---------------------------------------------------------------------------
++# Fenced code blocks
++# ---------------------------------------------------------------------------
++
++def test_code_block_basics():
++    assert to_html("```\ncode\n```") == "<pre><code>code</code></pre>"
++
++
++def test_code_block_with_language():
++    assert (
++        to_html("```python\nx = 1\n```")
++        == '<pre><code class="language-python">x = 1</code></pre>'
++    )
++
++
++def test_code_block_keeps_indentation_verbatim():
++    assert (
++        to_html("```\n    indented\n  more\n```")
++        == "<pre><code>    indented\n  more</code></pre>"
++    )
++
++
++def test_code_block_is_escaped():
++    assert (
++        to_html("```\na < b & c\n```")
++        == "<pre><code>a &lt; b &amp; c</code></pre>"
++    )
++
++
++def test_code_block_is_not_formatted():
++    assert (
++        to_html("```\n**not** and *em* and `co`\n```")
++        == "<pre><code>**not** and *em* and `co`</code></pre>"
++    )
++
++
++def test_blank_lines_inside_code_block_are_content():
++    # One blank line between the fences joins to empty content; two blank
++    # lines keep their joining newline.
++    assert to_html("```\n\n```") == "<pre><code></code></pre>"
++    assert to_html("```\n\n\n```") == "<pre><code>\n</code></pre>"
++
++
++def test_empty_code_block():
++    assert to_html("```\n```") == "<pre><code></code></pre>"
++
++
++def test_unclosed_code_block_runs_to_end():
++    assert to_html("```\na\nb") == "<pre><code>a\nb</code></pre>"
++    assert (
++        to_html("```python\nx")
++        == '<pre><code class="language-python">x</code></pre>'
++    )
++
++
++def test_fence_line_with_language_inside_code_block_is_content():
++    # Only a line that is exactly ``` closes the block, so a fenced line
++    # with a language is ordinary content.
++    assert (
++        to_html("```\n```python\n```")
++        == "<pre><code>```python</code></pre>"
++    )
++
++
++def test_list_and_heading_lines_are_content_inside_code_block():
++    assert (
++        to_html("```\n- a\n# h\n```")
++        == "<pre><code>- a\n# h</code></pre>"
++    )
++
++
++def test_fence_ends_paragraph_and_list():
++    assert (
++        to_html("text\n- a\n```\ncode\n```")
++        == "<p>text</p>\n<ul>\n<li>a</li>\n</ul>\n<pre><code>code</code></pre>"
++    )
++
++
++def test_fence_ends_paragraph_without_blank_line():
++    assert (
++        to_html("text\n```\ncode\n```")
++        == "<p>text</p>\n<pre><code>code</code></pre>"
++    )
++
++
++def test_code_block_followed_by_paragraph():
++    assert (
++        to_html("```\nc\n```\n\nafter")
++        == "<pre><code>c</code></pre>\n<p>after</p>"
++    )
++
++
++# ---------------------------------------------------------------------------
++# Combined documents with lists and code blocks
++# ---------------------------------------------------------------------------
++
++def test_mixed_lists_and_code_blocks_document():
++    text = (
++        "# Title\n"
++        "Text\n"
++        "\n"
++        "- a **bold**\n"
++        "- b\n"
++        "\n"
++        "1. one\n"
++        "2. two\n"
++        "\n"
++        "```\n"
++        "x < y\n"
++        "```\n"
++        "end"
++    )
++    expected = (
++        "<h1>Title</h1>\n"
++        "<p>Text</p>\n"
++        "<ul>\n<li>a <strong>bold</strong></li>\n<li>b</li>\n</ul>\n"
++        "<ol>\n<li>one</li>\n<li>two</li>\n</ol>\n"
++        "<pre><code>x &lt; y</code></pre>\n"
++        "<p>end</p>"
++    )
++    assert to_html(text) == expected
++
++
++# ---------------------------------------------------------------------------
++# Links
++# ---------------------------------------------------------------------------
++
++def test_link_basics():
++    assert to_html("[text](url)") == '<p><a href="url">text</a></p>'
++
++
++def test_link_with_formatted_text():
++    assert (
++        to_html("[**b** and *i*](u)")
++        == '<p><a href="u"><strong>b</strong> and <em>i</em></a></p>'
++    )
++
++
++def test_link_with_code_span_in_text():
++    assert (
++        to_html("[`code`](u)")
++        == '<p><a href="u"><code>code</code></a></p>'
++    )
++
++
++def test_link_text_is_escaped():
++    assert (
++        to_html("[a < b & c](u)")
++        == '<p><a href="u">a &lt; b &amp; c</a></p>'
++    )
++
++
++def test_url_escapes_ampersand():
++    assert to_html("[t](a&b)") == '<p><a href="a&amp;b">t</a></p>'
++
++
++def test_url_escapes_quote():
++    assert to_html('[t](a"b)') == '<p><a href="a&quot;b">t</a></p>'
++
++
++def test_url_escapes_ampersand_and_quote():
++    assert (
++        to_html('[t](a&"b)')
++        == '<p><a href="a&amp;&quot;b">t</a></p>'
++    )
++
++
++def test_no_link_inside_code_span():
++    assert to_html("a `[x](y)` b") == "<p>a <code>[x](y)</code> b</p>"
++
++
++def test_unpaired_brackets_are_literal():
++    assert to_html("[no link") == "<p>[no link</p>"
++    assert to_html("[x]") == "<p>[x]</p>"
++    assert to_html("[x] (y)") == "<p>[x] (y)</p>"
++
++
++def test_link_in_heading():
++    assert to_html("# [t](u)") == '<h1><a href="u">t</a></h1>'
++
++
++def test_link_in_list_item():
++    assert (
++        to_html("- [t](u)") == '<ul>\n<li><a href="u">t</a></li>\n</ul>'
++    )
++
++
++def test_emphasis_containing_link():
++    assert (
++        to_html("*[t](u)*") == '<p><em><a href="u">t</a></em></p>'
++    )
++
++
++def test_emphasis_spanning_code_span():
++    # A star inside the code span cannot close the emphasis; the span
++    # content is formatted recursively.
++    assert (
++        to_html("*a `b` c*") == "<p><em>a <code>b</code> c</em></p>"
++    )
++
++
++# ---------------------------------------------------------------------------
++# Escaping regression: headings, list items and paragraphs all escape
++# & < >
++# ---------------------------------------------------------------------------
++
++def test_heading_escapes_angle_brackets():
++    assert to_html("# a < b") == "<h1>a &lt; b</h1>"
++    assert to_html("# a > b") == "<h1>a &gt; b</h1>"
++
++
++def test_list_item_escapes_angle_brackets():
++    assert to_html("- x < y") == "<ul>\n<li>x &lt; y</li>\n</ul>"
++    assert to_html("1. x > y") == "<ol>\n<li>x &gt; y</li>\n</ol>"
++
++
++def test_paragraph_escapes_ampersand_and_angle_brackets():
++    assert to_html("z < w") == "<p>z &lt; w</p>"
++    assert to_html("a & b > c") == "<p>a &amp; b &gt; c</p>"
++
++
++# ---------------------------------------------------------------------------
++# Command line interface
++# ---------------------------------------------------------------------------
++
++def _run_cli(args, stdin=None):
++    return subprocess.run(
++        [sys.executable, "-m", "mdlite", *args],
++        input=stdin,
++        capture_output=True,
++        text=True,
++        cwd=REPO_ROOT,
++    )
++
++
++def test_cli_reads_file(tmp_path):
++    src = tmp_path / "doc.md"
++    src.write_text("# T\n\n* a **b**\n", encoding="utf-8")
++    proc = _run_cli([str(src)])
++    assert proc.returncode == 0
++    assert proc.stdout == to_html(src.read_text(encoding="utf-8")) + "\n"
++
++
++def test_cli_reads_stdin():
++    proc = _run_cli([], stdin="# T\n\ntext")
++    assert proc.returncode == 0
++    assert proc.stdout == to_html("# T\n\ntext") + "\n"
++
++
++def test_cli_empty_stdin_prints_only_newline():
++    proc = _run_cli([], stdin="")
++    assert proc.returncode == 0
++    assert proc.stdout == "\n"

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "llamacpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama.cpp (local)",
+      "options": { "baseURL": "http://127.0.0.1:8099/v1" },
+      "models": {
+        "qwen3.8-27b-w4a4": {
+          "name": "Qwen3.8 27B W4A4 (ruquant)",
+          "limit": { "context": 65536, "output": 16384 },
+          "reasoning": true,
+          "tool_call": true
+        }
+      }
+    }
+  },
+  "model": "llamacpp/qwen3.8-27b-w4a4",
+  "small_model": "llamacpp/qwen3.8-27b-w4a4",
+  "autoupdate": false,
+  "share": "disabled",
+  "lsp": false,
+  "formatter": false
+}

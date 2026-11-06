@@ -1,0 +1,45 @@
+ more_itertools/more.py |  2 +-
+ tests/test_more.py     | 17 +++++++++++++++++
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/more_itertools/more.py b/more_itertools/more.py
+index e31a62f..d471de9 100755
+--- a/more_itertools/more.py
++++ b/more_itertools/more.py
+@@ -1060,7 +1060,7 @@ def windowed(seq, n, fillvalue=None, step=1):
+ 
+     # Create the filler for the next windows. The padding ensures
+     # we have just enough elements to fill the last window.
+-    padding = (fillvalue,) * (n - 1 if step >= n else step - 2)
++    padding = (fillvalue,) * (n - 1 if step >= n else step - 1)
+     filler = map(window.append, chain(iterator, padding))
+ 
+     # Generate the rest of the windows
+diff --git a/tests/test_more.py b/tests/test_more.py
+index e6f7c6d..a072c66 100644
+--- a/tests/test_more.py
++++ b/tests/test_more.py
+@@ -858,6 +858,23 @@ class WindowedTests(TestCase):
+         expected = [(1, 2, 3), (4, 5, '!')]
+         self.assertEqual(actual, expected)
+ 
++    def test_fillvalue_step_last_window(self):
++        # Regression test: the final stepped window must still be yielded,
++        # padded with *fillvalue* where needed.
++        actual = list(mi.windowed(range(6), 3, step=2))
++        expected = [(0, 1, 2), (2, 3, 4), (4, 5, None)]
++        self.assertEqual(actual, expected)
++
++    def test_fillvalue_step_docstring(self):
++        actual = list(mi.windowed([1, 2, 3, 4, 5, 6], 3, fillvalue='!', step=2))
++        expected = [(1, 2, 3), (3, 4, 5), (5, 6, '!')]
++        self.assertEqual(actual, expected)
++
++    def test_fillvalue_step_wider_window(self):
++        actual = list(mi.windowed([1, 2, 3, 4, 5, 6, 7], 4, step=2))
++        expected = [(1, 2, 3, 4), (3, 4, 5, 6), (5, 6, 7, None)]
++        self.assertEqual(actual, expected)
++
+     def test_invalid_n(self):
+         with self.assertRaises(ValueError):
+             list(mi.windowed([1, 2, 3, 4, 5], 0))  # n is zero

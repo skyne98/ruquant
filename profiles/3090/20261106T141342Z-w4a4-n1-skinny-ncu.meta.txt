@@ -1,0 +1,12 @@
+label: w4a4-n1-skinny-ncu
+time: 2026-11-06T14:13:42Z
+host: fox-workstation
+gpu: NVIDIA GeForce RTX 3090 (driver 595.112.07)
+command: build-llama/build/bin/test-backend-ops perf -o MUL_MAT -b CUDA0 -p type_a=w4a4,type_b=f32,m=17408,n=1,
+settings: RQ_TC=0
+binary: build-llama/build/bin/test-backend-ops
+libggml-cuda.so md5: fe584e3bb85ae87b99dd389dd6733f7b
+environment:
+  LD_LIBRARY_PATH=/run/opengl-driver/lib:/nix/store/w36w2725s1sx6bscgz2sdq56q654y2d5-pipewire-1.6.9-jack/lib
+tool: ncu --set full -k regex:rq_skinny_kernel -s 10 -c 1
+exit: 0
