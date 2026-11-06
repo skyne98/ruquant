@@ -1,0 +1,79 @@
+0.00.442.392 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.00.442.402 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.00.442.407 W model has unused tensor blk.64.attn_q.weight (size = 125829120 bytes) -- ignoring
+0.00.442.408 W model has unused tensor blk.64.attn_k.weight (size = 10485760 bytes) -- ignoring
+0.00.442.411 W model has unused tensor blk.64.attn_v.weight (size = 10485760 bytes) -- ignoring
+0.00.442.416 W model has unused tensor blk.64.attn_output.weight (size = 33423360 bytes) -- ignoring
+0.00.442.418 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.00.442.419 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.00.442.422 W model has unused tensor blk.64.ffn_gate.weight (size = 94699520 bytes) -- ignoring
+0.00.442.424 W model has unused tensor blk.64.ffn_down.weight (size = 94699520 bytes) -- ignoring
+0.00.442.425 W model has unused tensor blk.64.ffn_up.weight (size = 94699520 bytes) -- ignoring
+0.00.442.427 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 104857600 bytes) -- ignoring
+0.00.442.429 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.00.442.431 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.00.442.435 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.15.479.104 I cmn          init: llama threadpool init, n_threads = 16
+0.15.678.129 I 
+0.15.678.265 I system_info: n_threads = 16 (n_threads_batch = 16) / 32 | CUDA : ARCHS = 860 | USE_GRAPHS = 1 | FA_QUANTS = q4_0-q4_0,q8_0-q8_0,f16-f16,bf16-bf16 | CPU : LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+0.15.742.468 I kl_divergence: computing over 16 chunks, n_ctx=2048, batch_size=2048, n_seq=1
+0.22.434.135 I kl_divergence: 6.69 seconds per pass - ETA 1.78 minutes
+
+chunk             PPL               ln(PPL(Q)/PPL(base))          KL Divergence              Δp RMS            Same top p
+   1       5.5555 ±    0.4045       0.07918 ±    0.01207       0.06098 ±    0.00503     7.782 ±  0.672 %    91.007 ±  0.895 %
+   2       6.4415 ±    0.3361       0.06130 ±    0.00804       0.05197 ±    0.00285     6.860 ±  0.456 %    90.225 ±  0.657 %
+   3       6.6095 ±    0.2821       0.05640 ±    0.00660       0.04956 ±    0.00229     6.610 ±  0.351 %    91.300 ±  0.509 %
+   4       6.4910 ±    0.2424       0.04924 ±    0.00546       0.04621 ±    0.00192     6.311 ±  0.285 %    91.496 ±  0.436 %
+   5       6.4643 ±    0.2195       0.04417 ±    0.00515       0.04991 ±    0.00224     6.453 ±  0.267 %    91.222 ±  0.396 %
+   6       5.5403 ±    0.1662       0.03710 ±    0.00473       0.04904 ±    0.00199     6.702 ±  0.257 %    91.382 ±  0.358 %
+   7       5.0432 ±    0.1367       0.03371 ±    0.00433       0.04847 ±    0.00192     6.806 ±  0.257 %    91.537 ±  0.329 %
+   8       5.0286 ±    0.1273       0.03066 ±    0.00403       0.04778 ±    0.00172     6.737 ±  0.235 %    91.642 ±  0.306 %
+   9       5.2724 ±    0.1263       0.03057 ±    0.00389       0.04939 ±    0.00160     6.715 ±  0.215 %    91.072 ±  0.297 %
+  10       5.4756 ±    0.1275       0.03545 ±    0.00380       0.05036 ±    0.00167     6.681 ±  0.204 %    90.987 ±  0.283 %
+  11       5.5266 ±    0.1226       0.03417 ±    0.00358       0.04883 ±    0.00153     6.554 ±  0.190 %    91.113 ±  0.268 %
+  12       5.7496 ±    0.1234       0.03275 ±    0.00337       0.04742 ±    0.00141     6.400 ±  0.179 %    91.235 ±  0.255 %
+  13       5.7990 ±    0.1194       0.03125 ±    0.00318       0.04648 ±    0.00132     6.358 ±  0.172 %    91.263 ±  0.245 %
+  14       5.8759 ±    0.1166       0.03125 ±    0.00302       0.04539 ±    0.00123     6.237 ±  0.163 %    91.195 ±  0.237 %
+  15       5.9185 ±    0.1137       0.03057 ±    0.00287       0.04438 ±    0.00115     6.135 ±  0.155 %    91.274 ±  0.228 %
+  16       6.0854 ±    0.1138       0.02997 ±    0.00276       0.04355 ±    0.00108     6.047 ±  0.148 %    91.343 ±  0.220 %
+
+====== Perplexity statistics ======
+Mean PPL(Q)                   :   6.085400 ±   0.113789
+Mean PPL(base)                :   5.905745 ±   0.109449
+Cor(ln(PPL(Q)), ln(PPL(base))):  98.91%
+Mean ln(PPL(Q)/PPL(base))     :   0.029967 ±   0.002757
+Mean PPL(Q)/PPL(base)         :   1.030420 ±   0.002841
+Mean PPL(Q)-PPL(base)         :   0.179656 ±   0.017061
+
+====== KL divergence statistics ======
+Mean    KLD:   0.043545 ±   0.001083
+Maximum KLD:   7.712735
+99.9%   KLD:   1.454489
+99.0%   KLD:   0.447358
+95.0%   KLD:   0.147625
+90.0%   KLD:   0.087019
+Median  KLD:   0.017831
+10.0%   KLD:   0.000269
+ 5.0%   KLD:   0.000072
+ 1.0%   KLD:   0.000010
+ 0.1%   KLD:   0.000001
+Minimum KLD:  -0.000001
+
+====== Token probability statistics ======
+Mean    Δp: -0.532 ± 0.047 %
+Maximum Δp: 92.301%
+99.9%   Δp: 38.044%
+99.0%   Δp: 15.440%
+95.0%   Δp:  6.433%
+90.0%   Δp:  3.588%
+75.0%   Δp:  0.553%
+Median  Δp: -0.017%
+25.0%   Δp: -1.313%
+10.0%   Δp: -5.163%
+ 5.0%   Δp: -8.647%
+ 1.0%   Δp: -20.140%
+ 0.1%   Δp: -55.254%
+Minimum Δp: -94.057%
+RMS Δp    :  6.047 ± 0.148 %
+Same top p: 91.343 ± 0.220 %
+

@@ -2138,6 +2138,25 @@ index e00f8e2..11963d4 100644
          case GGML_TYPE_MXFP4:   result = quantize_mxfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
          case GGML_TYPE_NVFP4:   result = quantize_nvfp4  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
          case GGML_TYPE_F8_E4M3: result = quantize_f8_e4m3(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 43eb46e..8eb7362 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -3179,6 +3179,14 @@ ggml_tensor * llm_graph_context::build_attn(
+         v_cur = llama_mul_mat_hadamard(ctx0, v_cur, inp->self_v_rot[il]);
+     }
+ 
++    // ruquant: RQ_EMUL_Q4Q=1 rounds the (rotated) Q to q4_0, int4 per 32 values with the largest value at -8, as
++    // mx-llama.cpp's gfx906 q4_0 attention (rq-fattn.cu) does, so its quality can be scored on other GPUs
++    static const bool emul_q4q = getenv("RQ_EMUL_Q4Q") && atoi(getenv("RQ_EMUL_Q4Q"));
++    if (emul_q4q && q_cur->ne[0] % 32 == 0) {
++        q_cur = ggml_cast(ctx0, ggml_cpy(ctx0, ggml_cont(ctx0, q_cur), ggml_new_tensor(ctx0, GGML_TYPE_Q4_0, GGML_MAX_DIMS, q_cur->ne)),
++                          GGML_TYPE_F32);
++    }
++
+     // these nodes are added to the graph together so that they are not reordered
+     // by doing so, the number of splits in the graph is reduced
+     // expand k later to enable rope fusion which directly writes into k-v cache
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
 index e4ebd7c..ca8451c 100644
 --- a/tests/test-backend-ops.cpp

@@ -68,6 +68,9 @@ rig/prof_summary.py PROFILE [RE]    # kernel-trace and counter medians per kerne
 rig/membench/build.sh HOST          # stream_bench: MI50 read bandwidth vs waves, loads in flight, stride, rotation, launch size
 rig/depth_bench.sh MODEL            # pp512 / tg128 / pp8 at context depths (default 0-64k), one GPU, TP2, TP4, with buffer sizes
 rig/long_ctx_bench.py M D N DEPTH   # DFlash2 through llama-server after a DEPTH-token document, against the questions alone
+rig/kvquant_bench.sh MODEL          # stock KV cache types: KLD at 2k, KLD at 32k against the f16 cache, speed at depth 0 / 64k
+rig/passkey_bench.py M D N DEPTH    # pass key retrieval at 5 positions of a DEPTH-token document, through llama-server with DFlash2
+rig/kv_box_bench.sh MODEL DRAFT     # q4_0 cache with our dot8 attention: KLD at 32k vs UD-Q8_K_XL, pass keys, speed, what context fits
 ggml_bench --types w4a4,q4_0 --lm q6_K,q8_0 --widths 1,6,8 | python3 rig/bench_summary.py
 ```
 

@@ -213,10 +213,14 @@ q4_0 nibbles straight into `v_dot8` for Q·K and f16 dot2 for P·V, for decode a
 - TP4 steps are unchanged.
 - The cache shrinks from 4.35 to 1.2 GB.
 - KLD stays within noise of the f16 cache: 0.0423 against 0.0416, 16 chunks at verify width.
+- At 32k context, against UD-Q8_K_XL run at 32k, the 4-bit cache with the kernel's int4 Q costs +0.0019 KLD: 0.0337
+  against the f16 cache's 0.0318, top-1 91.6% against 91.9% (3090, emulating the kernel's Q rounding). Our model is
+  closer to the reference there than at 2k context (0.040).
 - llama.cpp's own q4_0 / q8_0 attention is slower than f16 on gfx906 at depth (decode 3× slower with q4_0).
 
-This is in the local fork tree and `patches/`, not in the published fork commit. Details: REPORT-2026-11-02.md, "64k
-context", "quantized KV cache on our model" and "our q4 KV attention with v_dot8".
+This is fork commit e509cee on the ruquant branch, and in `patches/`. Details: REPORT-2026-11-02.md, "64k context",
+"quantized KV cache on our model", "our q4 KV attention with v_dot8" and "the 4-bit KV cache against the reference at
+32k".
 
 ## Methodology
 
