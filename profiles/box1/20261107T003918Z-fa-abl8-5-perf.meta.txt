@@ -1,0 +1,7 @@
+label: fa-abl8-5-perf
+time: 2026-11-07T00:39:18Z
+host: 5638624099aa
+command: /home/gpu/mx-llama.cpp/build-abl8/bin/test-backend-ops perf -o FLASH_ATTN_EXT -p type_K=q4_0,type_V=q4_0 -b ROCm0
+settings: RQ_FA_ABL=5 HIP_VISIBLE_DEVICES=0
+libggml-hip.so md5: 5f30c89cdddf471871da088615f1d1b8
+exit: 0

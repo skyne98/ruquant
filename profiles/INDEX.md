@@ -84,6 +84,23 @@ ablation switch `RQ_FA_ABL`). `rig/fa_bench.sh` = test-backend-ops perf of the q
 | `fa-occ-tp4-abab` | TP4 depth 0, old / new alternating during that host load | invalid for the comparison: shows the host load's effect |
 | `fa-occ-tp4` | TP4, published / new / published / new on an idle host | 64k verify 33.0 -> 31.9 ms, decode 19.7 -> 19.1 ms; DFlash2 step unchanged (44-47 ms) |
 
+## 2026-11-07: what is left at 64k, and three smaller cuts (`rq-fattn.cu`, box 1)
+
+Builds `build-occ7` (K prepared at tile load, DPP sum), `occ8` (+ own combine, kept), `occ9` (loads pipelined, dropped),
+`abl8` (temporary `RQ_FA_ABL` on occ8), `slp` / `slp2` (temporary start delays). `rig/step_depth.py` splits a traced
+DFlash2 run into deep and short steps; `rig/fa_tp4.sh` = TP4 old / new alternating.
+
+| profiles | what | result |
+|---|---|---|
+| `step-trace-64k` | kernel trace of a one-GPU DFlash2 server run, 64k document then short prompts (published kernel; the server hung on exit under rocprofv3 and was stopped) | step 67.9 vs 51.3 ms; attention +14.4 ms, combine +0.25, drafter attention +0.26 |
+| `fa-occ7-*`, `fa-occ6-gpu1-*` | K prepared at load + DPP sum, against the published kernel on the same GPU | decode 348 -> 289, verify 1012 -> 977 us |
+| `fa-occ7-tp4shape` | trace of the TP4 shape (1 KV head) | attention 244 us, llama.cpp combine 50 us per verify call |
+| `fa-occ8-tests` | own combine: all FLASH_ATTN_EXT tests, int8 Q | 4001/4001, 359/359 |
+| `fa-abl8-<mask>-*` | phases of occ8 at 64k (1 no loads, 2 no Q.K, 4 no P.V, 6 loads only, 3 P.V only, 5 Q.K only) | verify 988: loads 227, Q.K 317, P.V 550 (they add up); decode 285: loads 148 |
+| `20261107T005000Z-fa-direct-runs.txt` | direct test-backend-ops runs: occ7 / occ8 / occ9, TP4 shapes, start delays | occ8 kept; occ9 and the delays dropped |
+| `fa-occ-e2e` (2026-11-07) | occ8 against the published kernel, one GPU side by side, KLD | decode at 64k 36.50 -> 35.15 ms, DFlash2 step 67-69 -> 66-67 ms; KLD 0.0447 |
+| `fa-e2e-tp4` | TP4, published / occ8 / published / occ8, quiet host | decode at 64k 19.0 -> 18.5 ms, verify 31.8 -> 31.1 ms |
+
 ## 2026-11-06: W4A4 and q4_0 attention on the INT4 tensor cores (RTX 3090, `build-llama/`)
 
 `rig/prof_cuda.sh`, test-backend-ops perf mode (fuses three repeats of one weight per launch where it can).

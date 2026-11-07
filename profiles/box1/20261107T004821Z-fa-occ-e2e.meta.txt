@@ -1,0 +1,14 @@
+label: fa-occ-e2e
+time: 2026-11-07T00:48:21Z
+new: /home/gpu/mx-llama.cpp/build-occ8/bin (libggml-hip.so md5 6ababc809abdfe03995fb2379c5f2297)
+old: /home/gpu/mx-llama.cpp/build-occ6/bin (libggml-hip.so md5 0037010fa59f401ccde4726e71eeecec)
+q4_0 cache, default settings (RQ_FA_DOT8 unset = 1); parts: tests (GPU 2), KLD -ub 8 (GPU 3), llama-bench one GPU (old GPU 0, new GPU 1),
+DFlash2 after 64k one GPU (old GPU 0, new GPU 1) and TP4, llama-bench TP4
+gpu check at start:
+GPU 0: use 0%, VRAM 0 GB, idle
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+host load 1.69
+TP4 part: 
+exit: 0

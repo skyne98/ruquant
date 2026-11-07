@@ -4,13 +4,13 @@
 #   1. test-backend-ops FLASH_ATTN_EXT, all cases, int4 and int8 Q (GPU 2)
 #   2. KLD against UD-Q8_K_XL, 16 chunks, 8-token ubatches so attention runs at verify width (GPU 3)
 #   3. llama-bench tg128 / pp8 / pp16 at depth 0 and 65536, one GPU (OLD on GPU 0, NEW on GPU 1 at the same time)
-#   4. DFlash2 after a 64k-token document (rig/long_ctx_bench.py), one GPU (OLD GPU 0, NEW GPU 1), then TP4 OLD, NEW
-#   5. llama-bench tg128 / pp8 at depth 0 and 65536 at TP4, OLD then NEW
+#   4. DFlash2 after a 64k-token document (rig/long_ctx_bench.py), one GPU (OLD GPU 0, NEW GPU 1)
+#   5. TP4: rig/fa_tp4.sh (old / new / old / new: DFlash2 after 64k, llama-bench at depth 0 and 65536)
 #   bash rig/fa_e2e.sh NEW [OLD]
 # Old and new run side by side on GPUs 0 and 1 in parts 3 and 4, so the depth-0 numbers are the control for the two
 # GPUs' own difference.
 new=$1 old=${2:-tm}
-# other people may be using the box's GPUs: start only if all four are idle, and check again before the TP4 part
+# other people may be using the box's GPUs: start only if all four are idle (rig/fa_tp4.sh checks again, host load too)
 ~/rig/gpu_idle.sh 0,1,2,3 || { echo "GPUs busy, not running"; exit 1; }
 d=~/profiles/$(date -u +%Y%m%dT%H%M%SZ)-fa-occ-e2e; mkdir -p $d
 M=$HOME/models/qwen3.8-27b-ost44-v2-wg64-rb4-gptq.gguf
@@ -46,21 +46,13 @@ for which in old new; do
     python3 ~/rig/long_ctx_bench.py $M $D 7 65536 > $d/dflash1-$which.txt 2>&1 &
 done
 wait
-# our own servers can take a few seconds to free their memory: retry for a minute before calling the GPUs busy
-for i in 1 2 3 4 5 6; do ~/rig/gpu_idle.sh 0,1,2,3 > /dev/null && break; sleep 10; done
-if ! ~/rig/gpu_idle.sh 0,1,2,3 >> $d/meta.txt; then
-  echo "TP4 part skipped: GPUs busy at $(date -u +%T)" | tee -a $d/meta.txt
-else
-for which in old new; do
-  b=$BO; [ $which = new ] && b=$BN
-  BIN=$b GPUS=0,1,2,3 EXTRA="-ctk q4_0 -ctv q4_0 -sm tensor -devd ROCm0" LOG=$d/server4-$which.log timeout 3600 \
-    python3 ~/rig/long_ctx_bench.py $M $D 7 65536 > $d/dflash4-$which.txt 2>&1
-  for t in "-p 0 -n 128 -r 3 -d 0,65536" "-p 8 -n 0 -r 20 -d 0,65536"; do bench $b 0,1,2,3 $d/bench4-$which.txt -sm tensor $t; done
-done
-fi
+# TP4: rig/fa_tp4.sh, old and new alternating, into its own profile
+bash ~/rig/fa_tp4.sh $old $new fa-e2e-tp4 > $d/tp4.log 2>&1
+echo "TP4 part: $(grep -E 'profile|busy' $d/tp4.log | tail -1)" >> $d/meta.txt
 { echo "== tests"; grep -h "tests passed" $d/tests.log $d/tests-int8q.log
   echo "== KLD (new)"; cat $d/kld-new.txt
-  for f in bench1-old bench1-new bench4-old bench4-new; do echo "== $f"; cat $d/$f.txt; done
-  for f in dflash1-old dflash1-new dflash4-old dflash4-new; do echo "== $f"; grep -E "^(document|short)" $d/$f.txt; done; } > $d/results.txt
+  for f in bench1-old bench1-new; do echo "== $f"; cat $d/$f.txt; done
+  for f in dflash1-old dflash1-new; do echo "== $f"; grep -E "^(document|short)" $d/$f.txt; done
+  echo "== TP4"; cat $(ls -dt ~/profiles/*fa-e2e-tp4 | head -1)/results.txt; } > $d/results.txt
 echo "exit: 0" >> $d/meta.txt
 echo E2E-DONE

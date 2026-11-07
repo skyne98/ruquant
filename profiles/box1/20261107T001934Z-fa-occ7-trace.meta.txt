@@ -1,0 +1,13 @@
+label: fa-occ7-trace
+time: 2026-11-07T00:19:34Z
+host: 5638624099aa
+command: /home/gpu/mx-llama.cpp/build-occ7/bin/test-backend-ops perf -o FLASH_ATTN_EXT -p type_K=q4_0,type_V=q4_0 -b ROCm0
+settings: HIP_VISIBLE_DEVICES=1
+rocprofv3: /home/gpu/therock-7.12/bin/rocprofv3 --kernel-trace
+binary: /home/gpu/mx-llama.cpp/build-occ7/bin/test-backend-ops
+libggml-hip.so md5: ff854421ac269c5e56a5493d9f584f9e
+gpus: 4 (/sys/class/kfd/kfd/topology/nodes/0/properties:gfx /sys/class/kfd/kfd/topology/nodes/1/properties:gfx /sys/class/kfd/kfd/topology/nodes/2/properties:gfx /sys/class/kfd/kfd/topology/nodes/3/properties:gfx /sys/class/kfd/kfd/topology/nodes/4/properties:gfx )
+environment:
+  HIP_VISIBLE_DEVICES=1
+  LD_LIBRARY_PATH=/home/gpu/mx-llama.cpp/build-occ7/bin:/home/gpu/therock-7.12/lib
+exit: 0

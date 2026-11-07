@@ -1,0 +1,10 @@
+label: step-trace-64k
+time: 2026-11-07T00:13:11Z
+host: 5638624099aa
+command: env BIN=/home/gpu/mx-llama.cpp/build-occ6/bin GPUS=0 EXTRA=-ctk q4_0 -ctv q4_0 N=128 PORT=8099 python3 /home/gpu/rig/long_ctx_bench.py /home/gpu/models/qwen3.8-27b-ost44-v2-wg64-rb4-gptq.gguf /home/gpu/models/dflash2-ost44-h4-l4-c8-g64-rb4.gguf 7 65536
+settings: BIN=/home/gpu/mx-llama.cpp/build-occ6/bin GPUS=0 EXTRA=-ctk q4_0 -ctv q4_0 N=128
+rocprofv3: /home/gpu/therock-7.12/bin/rocprofv3 --kernel-trace
+binary: /usr/bin/env
+gpus: 4 (/sys/class/kfd/kfd/topology/nodes/0/properties:gfx /sys/class/kfd/kfd/topology/nodes/1/properties:gfx /sys/class/kfd/kfd/topology/nodes/2/properties:gfx /sys/class/kfd/kfd/topology/nodes/3/properties:gfx /sys/class/kfd/kfd/topology/nodes/4/properties:gfx )
+environment:
+exit: 0

@@ -1,0 +1,23 @@
+label: fa-direct-runs (box 1, 2026-11-07 00:20-00:45 UTC)
+These ran as direct commands, not through rig/prof.sh; recorded here with their binaries' libggml-hip.so md5.
+Command (GPU 0 or 1 after rig/gpu_idle.sh; LOAD_MAX 8 while my own step trace ran on GPU 0):
+  HIP_VISIBLE_DEVICES=G LD_LIBRARY_PATH=$B:~/therock-7.12/lib $B/test-backend-ops perf -o FLASH_ATTN_EXT \
+    -p "kv=65536,nb=(1|8),.*type_K=q4_0" -b ROCm0          (us per call; nh=4: one GPU, nh=1: one GPU of TP4)
+
+builds: occ6 = published fork 047d127 (0037010fa59f401ccde4726e71eeecec), occ7 = K prepared at tile load + DPP sum
+(ff854421ac269c5e56a5493d9f584f9e), occ8 = occ7 + rq_fa_combine (6ababc809abdfe03995fb2379c5f2297), occ9 = occ8 +
+loads pipelined with compute (95ebe14fe0ede5e8ce8172ae02b9da87), slp / slp2 = occ8 + RQ_FA_SLEEP start delay for every
+other workgroup (574df050ca906bcf3cf59b441ce74a27 / ef4f38e0632172038aac0ecc5681b660)
+
+TP4 shape (nh=1), GPU 1:      occ6 nb1 117.70  nb8 305.94 | occ7 nb1 102.60  nb8 298.11
+GPU 1:                        occ7: nh4 nb1 289.73  nb8 972.81  nh1 nb1 102.20  nb8 300.59
+                              occ8: nh4 nb1 281.99  nb8 976.16  nh1 nb1  81.46  nb8 271.02   (tests 4001/4001, 359/359)
+GPU 0:                        occ8: nh4 nb1 281.99  nb8 974.68  nh1 nb1  81.19  nb8 270.59
+                              occ9: nh4 nb1 248.14  nb8 1156.16 nh1 nb1 127.50  nb8 332.48   (359/359 q4_0 tests)
+slp, delay if (blockIdx.x + blockIdx.y) odd, GPU 0, RQ_FA_SLEEP = 0 / 1 / 2 / 3 / 4 / 6 (x 8128 cycles):
+  nh4 nb1 282.09 284.29 288.80 294.27 297.10 306.37   nb8 979.04 977.96 981.04 988.16 993.83 1002.12
+  nh1 nb1  81.21  85.02  89.51  93.73  97.81 106.53   nb8 271.27 273.46 276.90 282.38 286.56 292.69
+slp2, delay if (linear id / 60) odd, GPU 0, RQ_FA_SLEEP = 0 / 1 / 2 / 3:
+  nh4 nb1 283.22 287.50 290.53 294.93   nb8 977.78 979.62 982.93 985.76
+Conclusion: occ8 kept; occ9 (spills at 64 VGPRs) and the start delays (no gain) dropped.
+exit: 0

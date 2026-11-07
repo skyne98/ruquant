@@ -1,0 +1,10 @@
+label: fa-occ7-tests
+libggml-hip.so md5: ff854421ac269c5e56a5493d9f584f9e
+command: test-backend-ops -o FLASH_ATTN_EXT -b ROCm0 (GPU 1), RQ_FA_DOT8 1 then 2 (q4_0 cases)
+gpu check:
+GPU 1: use 0%, VRAM 0 GB, idle
+KFD process information:
+PID    	PROCESS NAME	GPU(s)	VRAM USED  	SDMA USED	CU OCCUPANCY	
+2225307	UNKNOWN     	1     	25892380672	0        	4           	
+host load 3.26
+exit: 0

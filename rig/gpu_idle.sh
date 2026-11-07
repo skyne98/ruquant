@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Checks that GPUs of a shared box are idle before a run: other people may be using them. Prints each GPU's load, VRAM
 # in use and the processes holding it, and the host's load average; exits 1 if any listed GPU is busy (load above 5%,
-# more than 1 GB of VRAM) or the host's 1-minute load is above LOAD_MAX (default 3). Box 1's host is shared beyond our
-# container: another tenant's CPU job (load 17 on 12 cores) slowed TP4 decode by 15-50% while every GPU looked idle,
-# since TP4 spins host threads on each all-reduce.
+# more than 1 GB of VRAM) or the host's 1-minute load is above LOAD_MAX (default 6, half of box 1's cores; TP runs pass
+# 3). Box 1's host is shared beyond our container: another tenant's CPU job (load 17 on 12 cores) slowed TP4 decode by
+# 15-50% while every GPU looked idle, since TP4 spins host threads on each all-reduce. One-GPU runs hardly notice.
 #   rig/gpu_idle.sh [GPUS]      GPUS: comma-separated indices (default all); env LOAD_MAX
 set -uo pipefail
 want=${1:-all}
@@ -22,8 +22,8 @@ for ((g = 0; g < n; g++)); do
 done
 echo "$info" | sed -n '/KFD process information/,/=====/p' | grep -vE "^=+|^$" | head -12
 load=$(cut -d' ' -f1 /proc/loadavg)
-if awk -v l="$load" -v m="${LOAD_MAX:-3}" 'BEGIN { exit !(l > m) }'; then
-    echo "host load $load (above ${LOAD_MAX:-3}): BUSY"; busy=1
+if awk -v l="$load" -v m="${LOAD_MAX:-6}" 'BEGIN { exit !(l > m) }'; then
+    echo "host load $load (above ${LOAD_MAX:-6}): BUSY"; busy=1
 else
     echo "host load $load"
 fi
