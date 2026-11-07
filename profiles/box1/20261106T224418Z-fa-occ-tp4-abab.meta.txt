@@ -1,0 +1,21 @@
+label: fa-occ-tp4-abab
+time: 2026-11-06T22:44:18Z
+TP4 llama-bench tg128 / pp8 at depth 0, builds tm (old) and occ6 (new) alternating
+GPU 0: use 0%, VRAM 0 GB, idle
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+GPU 0: use 0%, VRAM 0 GB, idle
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+GPU 0: use 0%, VRAM 0 GB, idle
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+GPU 0: use 0%, VRAM 0 GB, idle
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+exit: 0
+INVALID for the comparison: host CPU load 15-17 from another tenant during the whole run (shows the effect, not the builds)

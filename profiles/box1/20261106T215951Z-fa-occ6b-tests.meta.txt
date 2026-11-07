@@ -1,0 +1,6 @@
+label: fa-occ6b-tests
+libggml-hip.so md5: 0037010fa59f401ccde4726e71eeecec
+command: test-backend-ops -o FLASH_ATTN_EXT -b ROCm0 (GPU 1), RQ_FA_DOT8 1 then 2 (q4_0 cases)
+gpu check:
+GPU 1: use 0%, VRAM 0 GB, idle
+exit: 0

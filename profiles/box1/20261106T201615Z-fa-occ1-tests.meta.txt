@@ -1,0 +1,4 @@
+label: fa-occ1-tests
+libggml-hip.so md5: 144eee38e598d4703da127173f515f94
+command: test-backend-ops -o FLASH_ATTN_EXT -b ROCm0 (GPU 1)
+exit: 0

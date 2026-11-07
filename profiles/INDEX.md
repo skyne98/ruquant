@@ -63,6 +63,27 @@ Builds `build-fa` (v1), `build-fa2` (v2), `build-fa3` (v3, kept), `build-fa4` (v
 | `fa-dot8-quality` | KLD with 8-token ubatches (f16, stock q4_0, dot8 int4 Q, int8 Q) and DFlash2 after a 64k document (one GPU, TP4) | KLD 0.0416 / 0.0442 / 0.0423 / 0.0425; one-GPU DFlash2 step at 64k 71.5 ms against 79-80 with f16 |
 | `fa-dot8-final` | final build (`build-fa7`, on by default, Q rounded as q4_0): all FLASH_ATTN_EXT tests, KLD at 8-token ubatches, one-GPU speed at 64k | 4001/4001 tests pass; KLD 0.0434; verify 59.6 ms, decode 38.5 ms at 64k |
 
+## 2026-11-06: more waves for the q4 attention (`rq-fattn.cu`, box 1)
+
+Builds `build-occ0` (published kernel, with the new perf cases), `occ1`-`occ4`, `occ6` (kept), `abl` (temporary
+ablation switch `RQ_FA_ABL`). `rig/fa_bench.sh` = test-backend-ops perf of the q4_0 attention (trace + timing),
+`rig/fa_pmc.sh` = counters at 64k, `rig/fa_e2e.sh` = end to end against `build-tm`.
+
+| profiles | what | result |
+|---|---|---|
+| `fa-occ0-base-*` | published kernel, attention alone at 16k / 64k, 1 / 8 / 16 tokens | 64k: 483 / 1280 / 3524 us |
+| `fa-occ0-kv65536-nb8-pmc*` | its counters at 64k, 8 tokens | VALU 61.7M, LDS 9.3M, VALU busy 50% |
+| `fa-occ1-*` | 8-wave workgroups, Q.K block by block, all widths <= 64 VGPRs | 360 / 1252 / 2398 us; VALU +23%, SMEM 5x |
+| `fa-occ2-*` | Q block-major, Q.K without per-row guards (+ decode counters) | 385 / 1219 / 2362 us; VALU busy 67% |
+| `fa-occ3-*` | P at an aligned LDS offset (ds_read_b128 back) | 376 / 1153 / 2291 us |
+| `fa-occ4-*` | lazy rescaling of the softmax | 370 / 1108 / 2204 us; 4001/4001 tests |
+| `fa-abl-<mask>-*` | `RQ_FA_ABL`: 1 no tile loads, 2 no Q.K, 8 no softmax, 4 no P.V (and sums), 8 tokens at 64k | 1114 full, 960 / 831 / 997 / 496; loads only 211, Q.K only 347, P.V only 707: the phases add up, P.V bound by LDS |
+| `fa-occ6-*` | stopped: started before the GPU-idle rule, killed at the user's interruption; incomplete, not used | - |
+| `fa-occ6b-*` | two channels per lane (kept) | 348 / 1010 / 1904 us; LDS 7.9M, ALU stalled by LDS 1.2%, VALU busy 72%; 4001/4001 + 359/359 int8-Q tests |
+| `fa-occ-e2e` | end to end, one GPU side by side (TP4 part invalid: host CPU load from another tenant) | DFlash2 step after 64k 72 -> 67 ms, decode 25.8 -> 27.4 t/s, KLD 0.0441 |
+| `fa-occ-tp4-abab` | TP4 depth 0, old / new alternating during that host load | invalid for the comparison: shows the host load's effect |
+| `fa-occ-tp4` | TP4, published / new / published / new on an idle host | 64k verify 33.0 -> 31.9 ms, decode 19.7 -> 19.1 ms; DFlash2 step unchanged (44-47 ms) |
+
 ## 2026-11-06: W4A4 and q4_0 attention on the INT4 tensor cores (RTX 3090, `build-llama/`)
 
 `rig/prof_cuda.sh`, test-backend-ops perf mode (fuses three repeats of one weight per launch where it can).

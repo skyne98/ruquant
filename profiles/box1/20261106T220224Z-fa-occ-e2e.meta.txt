@@ -1,0 +1,24 @@
+label: fa-occ-e2e
+time: 2026-11-06T22:02:24Z
+new: /home/gpu/mx-llama.cpp/build-occ6/bin (libggml-hip.so md5 0037010fa59f401ccde4726e71eeecec)
+old: /home/gpu/mx-llama.cpp/build-tm/bin (libggml-hip.so md5 e0c11dd640a3f2a549a0d4c2f2c5f4a5)
+q4_0 cache, default settings (RQ_FA_DOT8 unset = 1); parts: tests (GPU 2), KLD -ub 8 (GPU 3), llama-bench one GPU (old GPU 0, new GPU 1),
+DFlash2 after 64k one GPU (old GPU 0, new GPU 1) and TP4, llama-bench TP4
+gpu check at start:
+GPU 0: use 0%, VRAM 0 GB, idle
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+GPU 0: use 0%, VRAM 12 GB, BUSY
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+TP4 part skipped: GPUs busy at 22:25:08
+exit: 0
+TP4 part run separately at 2026-11-06T22:27:19Z (tp4.sh), gpu check:
+GPU 0: use 0%, VRAM 0 GB, idle
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+tp4 exit: 0
+TP4 results (dflash4-*, bench4-*) INVALID: another tenant ran a CPU job on the host from ~22:30 UTC (load 17 on 12 cores at 22:48), after the old build's TP4 runs and during the new build's; GPUs looked idle. Rerun separately.

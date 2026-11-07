@@ -213,19 +213,22 @@ takes 243 / 134 / 84 s.
 
 **`-ctk q4_0 -ctv q4_0`** turns on the fork's own attention over a 4-bit cache (`rq-fattn.cu`). It uses the rotated
 q4_0 nibbles straight into `v_dot8` for Q·K and f16 dot2 for P·V, for decode and the verify.
-- On one GPU at 64k it takes the DFlash2 step to 71-72 ms (-11%), the verify forward from 64.4 to 59.6 ms, and decode
-  from 44.7 to 38.5 ms.
-- TP4 steps are unchanged.
+- On one GPU at 64k it takes the DFlash2 step to 67-68 ms (f16 cache: 79-80, short prompt: 50), the 8-token verify
+  forward from 64.4 to 54.5 ms, and decode from 44.7 to 36.5 ms (27.4 t/s).
+- At TP4 the verify forward is 1 ms faster than the first version (33.0 -> 31.9 ms); the DFlash2 step stays at 44-47 ms,
+  as with f16.
 - The cache shrinks from 4.35 to 1.2 GB.
-- KLD stays within noise of the f16 cache: 0.0423 against 0.0416, 16 chunks at verify width.
+- KLD at verify width: 0.0441 against 0.0416 for the f16 cache, 16 chunks (±3%).
+- The floor: at 64k one verify reads 1.2 GB of cache and does ~100 G multiply-adds, ~5 ms on one MI50. The kernel is
+  at ~3x that, so a step stays ~17 ms above short context.
 - At 32k context, against UD-Q8_K_XL run at 32k, the 4-bit cache with the kernel's int4 Q costs +0.0019 KLD: 0.0337
   against the f16 cache's 0.0318, top-1 91.6% against 91.9% (3090, emulating the kernel's Q rounding). Our model is
   closer to the reference there than at 2k context (0.040).
 - llama.cpp's own q4_0 / q8_0 attention is slower than f16 on gfx906 at depth (decode 3× slower with q4_0).
 
-This is fork commit e509cee on the ruquant branch, and in `patches/`. Details: REPORT-2026-11-02.md, "64k context",
-"quantized KV cache on our model", "our q4 KV attention with v_dot8" and "the 4-bit KV cache against the reference at
-32k".
+This is fork commit 047d127 on the ruquant branch (e509cee the first version), and in `patches/`. Details:
+REPORT-2026-11-02.md, "64k context", "quantized KV cache on our model", "our q4 KV attention with v_dot8", "the 4-bit KV
+cache against the reference at 32k" and "more waves for the q4 attention at 64k".
 
 ## NVIDIA GPUs with INT4 tensor cores (3090, 2026-11-06)
 

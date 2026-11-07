@@ -1,0 +1,14 @@
+label: fa-occ6-kv65536-nb8-pmc2
+time: 2026-11-06T21:58:50Z
+host: 5638624099aa
+command: /home/gpu/mx-llama.cpp/build-occ6/bin/test-backend-ops perf -o FLASH_ATTN_EXT -p kv=65536,nb=8,.*type_K=q4_0,type_V=q4_0 -b ROCm0
+settings: HIP_VISIBLE_DEVICES=0
+rocprofv3: /home/gpu/therock-7.12/bin/rocprofv3 --pmc SQC_LDS_IDX_ACTIVE SQ_ACTIVE_INST_VALU SQ_BUSY_CYCLES GRBM_GUI_ACTIVE --kernel-include-regex rq_fa_q4
+binary: /home/gpu/mx-llama.cpp/build-occ6/bin/test-backend-ops
+libggml-hip.so md5: 0037010fa59f401ccde4726e71eeecec
+gpus: 4 (/sys/class/kfd/kfd/topology/nodes/0/properties:gfx /sys/class/kfd/kfd/topology/nodes/1/properties:gfx /sys/class/kfd/kfd/topology/nodes/2/properties:gfx /sys/class/kfd/kfd/topology/nodes/3/properties:gfx /sys/class/kfd/kfd/topology/nodes/4/properties:gfx )
+environment:
+  LD_LIBRARY_PATH=/home/gpu/mx-llama.cpp/build-occ6/bin:/home/gpu/therock-7.12/lib
+  ROCPROFILER_METRICS_PATH=/home/gpu/tp/rpdefs
+exit: 0
+stopped: killed at the user's interruption (2026-11-06 ~21:05 UTC), ran without the GPU idle check; incomplete, not used

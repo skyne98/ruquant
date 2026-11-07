@@ -1,0 +1,34 @@
+label: fa-occ-tp4
+time: 2026-11-06T23:04:51Z
+TP4 (-sm tensor -devd ROCm0), q4_0 cache, builds tm / occ6 / tm / occ6
+tm libggml-hip.so md5: e0c11dd640a3f2a549a0d4c2f2c5f4a5
+occ6 libggml-hip.so md5: 0037010fa59f401ccde4726e71eeecec
+check before tm (1) at 23:04:51:
+GPU 0: use 0%, VRAM 0 GB, idle
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+host load 1.53
+host load after tm (1): 4.04 3.57 5.27 2/1237 1780934
+check before occ6 (2) at 23:12:58:
+GPU 0: use 0%, VRAM 0 GB, idle
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+host load 2.73
+host load after occ6 (2): 3.81 3.53 4.51 3/1237 1781433
+check before tm (3) at 23:21:16:
+GPU 0: use 0%, VRAM 0 GB, idle
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+host load 2.81
+host load after tm (3): 3.77 3.71 4.17 3/1234 1781932
+check before occ6 (4) at 23:29:33:
+GPU 0: use 0%, VRAM 0 GB, idle
+GPU 1: use 0%, VRAM 0 GB, idle
+GPU 2: use 0%, VRAM 0 GB, idle
+GPU 3: use 0%, VRAM 0 GB, idle
+host load 2.86
+host load after occ6 (4): 4.12 3.89 4.01 2/1241 1782431
+exit: 0

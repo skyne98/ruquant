@@ -1,0 +1,13 @@
+label: fa-occ1-kv65536-nb8-pmc3
+time: 2026-11-06T20:19:18Z
+host: 5638624099aa
+command: /home/gpu/mx-llama.cpp/build-occ1/bin/test-backend-ops perf -o FLASH_ATTN_EXT -p kv=65536,nb=8,.*type_K=q4_0,type_V=q4_0 -b ROCm0
+settings: HIP_VISIBLE_DEVICES=0
+rocprofv3: /home/gpu/therock-7.12/bin/rocprofv3 --pmc ALUStalledByLDS LDSBankConflict GRBM_GUI_ACTIVE --kernel-include-regex rq_fa_q4
+binary: /home/gpu/mx-llama.cpp/build-occ1/bin/test-backend-ops
+libggml-hip.so md5: 144eee38e598d4703da127173f515f94
+gpus: 4 (/sys/class/kfd/kfd/topology/nodes/0/properties:gfx /sys/class/kfd/kfd/topology/nodes/1/properties:gfx /sys/class/kfd/kfd/topology/nodes/2/properties:gfx /sys/class/kfd/kfd/topology/nodes/3/properties:gfx /sys/class/kfd/kfd/topology/nodes/4/properties:gfx )
+environment:
+  LD_LIBRARY_PATH=/home/gpu/mx-llama.cpp/build-occ1/bin:/home/gpu/therock-7.12/lib
+  ROCPROFILER_METRICS_PATH=/home/gpu/tp/rpdefs
+exit: 0

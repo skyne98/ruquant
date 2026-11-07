@@ -1,0 +1,5 @@
+label: fa-occ6-tests
+libggml-hip.so md5: 0037010fa59f401ccde4726e71eeecec
+command: test-backend-ops -o FLASH_ATTN_EXT -b ROCm0 (GPU 1), RQ_FA_DOT8 1 then 2 (q4_0 cases)
+stopped: killed at the user's interruption (2026-11-06 ~21:05 UTC), ran without the GPU idle check; incomplete, not used
+exit: killed (see stopped:)

@@ -1,0 +1,4 @@
+label: fa-occ2-tests
+libggml-hip.so md5: f542c186fe4f2bf7fae1e6148e8192d0
+command: test-backend-ops -o FLASH_ATTN_EXT -b ROCm0 (GPU 1), RQ_FA_DOT8 1 then 2
+exit: 0

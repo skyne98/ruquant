@@ -1,0 +1,7 @@
+label: fa-occ6b-perf
+time: 2026-11-06T22:00:15Z
+host: 5638624099aa
+command: /home/gpu/mx-llama.cpp/build-occ6/bin/test-backend-ops perf -o FLASH_ATTN_EXT -p type_K=q4_0,type_V=q4_0 -b ROCm0
+settings:  HIP_VISIBLE_DEVICES=0
+libggml-hip.so md5: 0037010fa59f401ccde4726e71eeecec
+exit: 0

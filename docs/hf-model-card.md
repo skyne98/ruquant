@@ -80,9 +80,9 @@ speculative verify, the fork reads it with its own int4 × int4 attention (Q qua
 INT4 tensor cores on NVIDIA); prefill uses llama.cpp's kernels.
 - Quality at 32k context against UD-Q8_K_XL run at 32k (positions 16k-32k, every position through the decode / verify
   kernel): KLD 0.0339 against 0.0319 for an f16 cache, top-1 91.5% against 91.8%.
-- Speed at 64k on one MI50: the DFlash2 step goes from 80 to 71.5 ms (decode 44.7 to 38.5 ms). At TP4 it is the same
-  as f16. It does not remove the cost of deep context (51 ms per step with a short prompt); the kernel is
-  latency-bound and has room left.
+- Speed at 64k on one MI50 (fork from 2026-11-07): the DFlash2 step goes from 80 to 67 ms, decode from 44.7 to
+  36.5 ms. At TP4 the step is about the same as with f16 (44-47 ms). Deep context still costs: 50 ms per step with a
+  short prompt. The hardware floor is ~5 ms above that, and the kernel is at ~3x it.
 - On an RTX 3090 one attention layer at 64k takes 211 us at decode and 341 us at an 8-token verify, against 328 / 366 us
   with an f16 cache.
 

@@ -19,6 +19,9 @@ Since 2026-11-06:
 - **Agents:** an agentic coding test (`accuracy/agentic/`): opencode, sandboxed, against eight tasks with hidden tests.
   All 16 runs with the 4-bit cache pass. The fork's server keeps its cache when a client returns the model's text in
   a different tokenization.
+- **64k context (2026-11-07):** the 4-bit cache's attention on gfx906 runs 4 waves per SIMD and two channels per lane.
+  On one MI50 a DFlash2 step after a 64k document takes 67 ms instead of 72 (f16 cache: 80), decode 27.4 t/s instead
+  of 25.8.
 
 ## Use it
 
