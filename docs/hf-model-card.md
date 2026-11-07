@@ -39,6 +39,62 @@ TheRock gfx90X build, the default) and ROCm 5.7.
 **Use this model's own projector for images.** The model's residual stream is rotated (OSTQuant), so the original
 Qwen3.8-27B projector, as unsloth's or anyone else's mmproj file ships it, gives the model noise instead of images.
 
+## Best setup for each GPU configuration
+
+Every number here was measured by us with these files, on the setup in its column. The MI50s are 32 GB cards on
+PCIe 3.0 running the fork built with ROCm 7.12; the 3090 runs the ruquant repo's llama.cpp build.
+
+| | 1× MI50 | 2× MI50 (TP2) | 4× MI50 (TP4) | 1× RTX 3090 |
+|---|---|---|---|---|
+| in the command below | `HIP_VISIBLE_DEVICES=0`, no `-sm tensor -devd ROCm0` | `HIP_VISIBLE_DEVICES=0,1` | as shown | its own command |
+| **DFlash2 decode, short prompts** | **84.2 t/s** | **98.4 t/s** | **113.3 t/s** | **137 t/s** (one request) |
+| tokens per verify step | 4.33 | 4.21 | 4.31 | |
+| prefill | 504 t/s (pp2048) | 882 t/s | 1389 t/s | 1493 t/s (pp512) |
+| plain decode, no drafter | 31.6 t/s | 46.8 t/s | 60.1 t/s | 38.0 t/s |
+| a 64k-token prompt | 240 s | 134 s (f16 cache) | 84 s | |
+| then DFlash2 decode | 44-76 t/s | not measured | 72-135 t/s | |
+| then plain decode | 28.4 t/s | not measured | 54.1 t/s | |
+
+**MI50s**, TP4 (build in "Reproduce the results", step 1):
+
+```sh
+export LD_LIBRARY_PATH=~/mx-llama.cpp/build-r712/bin:~/therock-7.12/lib
+export HSA_FORCE_FINE_GRAIN_PCIE=1 GGML_META_TOKEN_GRAPH=1 GGML_META_SPIN=2000000
+HIP_VISIBLE_DEVICES=0,1,2,3 ~/mx-llama.cpp/build-r712/bin/llama-server \
+    -m Qwen3.8-27B-W4A4-OST-GPTQ-wg64-rb4.gguf -md Qwen3.8-27B-DFlash2-W4A4H-drafter-rb4.gguf \
+    -ngl 99 -ngld 99 -fa 1 -lm dio -np 1 -sm tensor -devd ROCm0 \
+    --spec-type draft-dflash --spec-draft-n-max 7 \
+    -c 69632 -b 2048 -ub 2048 -ctk q4_0 -ctv q4_0
+```
+
+**RTX 3090**, or another NVIDIA GPU with INT4 tensor cores (Turing, Ampere, Ada). The ruquant repo builds upstream
+llama.cpp with its patch:
+
+```sh
+git clone https://github.com/skyne98/ruquant && cd ruquant
+SERVER=1 ./build-llama.sh     # needs the CUDA toolkit and cmake; the repo's `nix develop` has both
+build-llama/build/bin/llama-server \
+    -m Qwen3.8-27B-W4A4-OST-GPTQ-wg64-rb4.gguf -md Qwen3.8-27B-DFlash2-W4A4H-drafter-rb4.gguf \
+    -ngl 99 -ngld 99 -fa on -np 1 --jinja \
+    --spec-type draft-dflash --spec-draft-n-max 7 \
+    -c 65536 -b 1024 -ub 1024 -ctk q4_0 -ctv q4_0
+```
+
+How the numbers were taken:
+- Short prompts: 30 prompts × 256 tokens, greedy, on 2026-11-05. These runs used `-c 8192` and the default f16 cache
+  in place of the last line.
+- 64k: a 64k-token wikitext document, then three questions about it, 256 tokens each, greedy, with the MI50 command
+  as shown, on 2026-11-07. DFlash2 speed there depends on how well the drafter guesses each answer. A step costs
+  66-67 ms on one MI50 and 41-45 ms at TP4 (49-50 / 37-42 ms after a short prompt), and yields 3.0-5.7 tokens.
+- TP2 at 64k was measured only with an f16 cache: 57-59 ms per DFlash2 step.
+- 3090: llama-bench pp512 and tg64 with an f16 cache, and one DFlash2 request through the server. In 24 GB, 64k of
+  context next to the drafter fits only with the 4-bit cache. The agentic test below ran this exact command: all 16
+  runs passed.
+- The benchmarks added `-bs --samplers temperature` and sent temperature 0. Leave those out for chat and agent
+  clients, which send their own temperature (see "As a coding agent").
+- `--mmproj mmproj-Qwen3.8-27B-W4A4-F16.gguf` adds images. On the older ROCm 5.7 the short-prompt DFlash2 numbers are
+  80.2 / 89.5 / 109.6 t/s.
+
 ## Results (4× AMD MI50 32 GB, PCIe 3.0, ROCm 7.12)
 
 Measured in one session on 2026-11-05, on ROCm 7.12 (AMD's TheRock build for gfx90X) with whole-token HIP graphs. The
